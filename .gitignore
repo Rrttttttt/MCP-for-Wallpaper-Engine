@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.npm-cache/
+.we-mcp/
+we.config.json
+*.log

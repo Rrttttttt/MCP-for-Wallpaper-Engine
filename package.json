@@ -1,0 +1,25 @@
+{
+  "name": "wallpaper-engine-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local source-project authoring and verified preview tools for Wallpaper Engine",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "probe": "node dist/index.js --probe"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

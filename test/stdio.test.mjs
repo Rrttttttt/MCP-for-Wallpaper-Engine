@@ -1,0 +1,32 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { fileURLToPath } from 'node:url';
+
+test('real stdio handshake, 12 tools, project create/apply/error and clean shutdown',async t => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(),'we-mcp-stdio-'));
+  const configFile = path.join(workspace,'config.json');
+  await fs.writeFile(configFile,JSON.stringify({workspace:path.join(workspace,'data')}));
+  const transport = new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/index.js',import.meta.url)),'--config',configFile],stderr:'pipe'});
+  const client = new Client({name:'smoke-test',version:'1'});
+  t.after(async()=>{await client.close();await fs.rm(workspace,{recursive:true,force:true})});
+  await client.connect(transport);
+  const tools = await client.listTools(); assert.equal(tools.tools.length,12);
+  const created = await client.callTool({name:'we_project_create',arguments:{name:'test',title:'STDIO Test'}});
+  assert.equal(created.isError,undefined);
+  const project = created.structuredContent;
+  assert.equal(project.validation.valid,true);
+  const changed = await client.callTool({name:'we_project_apply',arguments:{projectId:project.projectId,expectedRevision:project.revision,changes:[{path:'note.txt',content:'hello'}]}});
+  assert.ok(changed.structuredContent.checkpointId);
+  const conflict = await client.callTool({name:'we_project_apply',arguments:{projectId:project.projectId,expectedRevision:project.revision,changes:[{path:'note.txt',content:'stale'}]}});
+  assert.equal(conflict.isError,true); assert.equal(conflict.structuredContent.error.code,'REVISION_CONFLICT');
+  const unavailable = await client.callTool({name:'we_preview_open',arguments:{projectId:project.projectId}});
+  assert.equal(unavailable.isError,true);
+  await client.close();
+  await new Promise(r=>setTimeout(r,150));
+  await assert.rejects(fs.access(path.join(workspace,'data','server.lock')),{code:'ENOENT'});
+});

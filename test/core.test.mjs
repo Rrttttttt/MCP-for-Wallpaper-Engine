@@ -1,0 +1,98 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import vm from 'node:vm';
+import { pathToFileURL } from 'node:url';
+import { Projects, validate, checkProperties } from '../dist/projects.js';
+import { relativeFile, readTree, revision } from '../dist/files.js';
+import { openArgs, propertyArgs } from '../dist/engine.js';
+import { matchesProject } from '../dist/cdp.js';
+
+async function fixture(t) {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(),'we-mcp-test-'));
+  t.after(() => fs.rm(workspace,{recursive:true,force:true}));
+  const config = { workspace, projectRoots:[], timeoutMs:1000 };
+  const projects = new Projects(config); await projects.init();
+  return { workspace,config,projects };
+}
+test('managed source lifecycle: create, validate, checkpoint, conflict, undo and stage',async t => {
+  const {projects,workspace} = await fixture(t);
+  const a = await projects.create('test','Test',{speed:2});
+  assert.equal(a.manifest.general.properties.speed.value,2);
+  assert.equal(a.validation.valid,true);
+  assert.equal((await projects.list()).total,1);
+  projects.config.projectRoots.push(a.path);
+  assert.equal((await projects.list()).total,1);
+  assert.equal(await projects.resolve('root0'),a.path);
+  const b = await projects.apply(a.projectId,a.revision,[{path:'notes.txt',content:'saved source'}]);
+  assert.notEqual(b.revision,a.revision);
+  await assert.rejects(projects.apply(a.projectId,a.revision,[{path:'notes.txt',content:'stale'}]),{code:'REVISION_CONFLICT'});
+  const recoveredProjects = new Projects({workspace,projectRoots:[],timeoutMs:1000});
+  const c = await recoveredProjects.restore(a.projectId,b.checkpointId,b.revision);
+  assert.equal(c.revision,a.revision);
+  await assert.rejects(projects.apply(a.projectId,c.revision,[{path:'index.html',content:null}]),{code:'VALIDATION_FAILED'});
+  await assert.rejects(projects.apply(a.projectId,c.revision,[{path:'INDEX.html',content:'alias'}]),{code:'VALIDATION_FAILED'});
+  await assert.rejects(projects.apply(a.projectId,c.revision,[{path:'index.html/child.txt',content:'alias'}]),{code:'VALIDATION_FAILED'});
+  await assert.rejects(projects.restore('managed/wrong',b.checkpointId,c.revision),{code:'INVALID_CHECKPOINT'});
+  const staged = await projects.publish(a.projectId,'new');
+  assert.equal(staged.uploaded,false);
+  assert.equal(validate(await readTree(staged.directory)).valid,true);
+  await assert.rejects(projects.create('test','Duplicate'),{code:'EEXIST'});
+});
+test('path boundaries, read-only roots and symlinks',async t => {
+  for (const name of ['../escape','/absolute','C:/x','a\\b','a/../b','.git/config','a:stream','a./file','CON.txt','a//b']) assert.throws(() => relativeFile(name),{code:'INVALID_PATH'});
+  const {projects,workspace,config} = await fixture(t);
+  await projects.create('test','Test');
+  await assert.rejects(projects.resolve('managed/../other',true),{code:'INVALID_PATH'});
+  const external = path.join(workspace,'external'); await fs.mkdir(external);
+  config.projectRoots.push(external);
+  await assert.rejects(projects.resolve('root0/example',true),{code:'READ_ONLY_SOURCE'});
+  const link = path.join(projects.root,'link');
+  await fs.symlink(external,link,process.platform==='win32'?'junction':'dir');
+  await assert.rejects(projects.resolve('managed/link/file'),{code:'UNSAFE_PATH'});
+  await assert.rejects(new Projects(config).init(),{code:'WORKSPACE_LOCKED'});
+});
+test('revision hashes content, missing resources fail, and audio metadata is required',async t => {
+  const {projects} = await fixture(t);
+  const p = await projects.create('test','Test');
+  const files = await readTree(p.path), old = revision(files);
+  files.set('style.css',Buffer.from('changed'));
+  assert.notEqual(revision(files),old);
+  files.delete('style.css'); assert.match(validate(files).errors.join(),/Missing dependency/);
+  const manifest = JSON.parse(files.get('project.json'));
+  delete manifest.supportsaudioprocessing;
+  files.set('project.json',Buffer.from(JSON.stringify(manifest)));
+  assert.match(validate(files).errors.join(),/supportsaudioprocessing/);
+});
+test('CLI is scoped and serialized as argument arrays; CEF ownership requires exact directory boundaries',() => {
+  assert.deepEqual(openArgs('C:/path with spaces/project.json','WE-MCP-id',1280,720),['-control','openWallpaper','-file','C:/path with spaces/project.json','-playInWindow','WE-MCP-id','-width','1280','-height','720']);
+  const name = 'WE-MCP-11111111-1111-1111-1111-111111111111';
+  assert.deepEqual(propertyArgs(name,{speed:2}),['-control','applyProperties','-location',name,'-properties','RAW~({"speed":2})~END']);
+  assert.throws(() => propertyArgs(name,{text:')~END -location Monitor0'}),{code:'INVALID_PROPERTY'});
+  const root = path.resolve('project with spaces');
+  assert.equal(matchesProject(pathToFileURL(path.join(root,'index.html')).href,root),true);
+  assert.equal(matchesProject(pathToFileURL(root+'-other/index.html').href,root),false);
+  assert.equal(matchesProject('http://127.0.0.1:9222',root),false);
+  assert.throws(() => checkProperties({speed:{type:'slider',min:0,max:4}}, {speed:5}),{code:'INVALID_PROPERTY'});
+  assert.throws(() => checkProperties({}, {unknown:true}),{code:'INVALID_PROPERTY'});
+});
+test('template registers audio early, handles sparse properties, pauses and obeys FPS',async () => {
+  const source = await fs.readFile(new URL('../templates/web-starfield/wallpaper.js',import.meta.url),'utf8');
+  let nextFrame, audioListener, draws = 0;
+  const ctx = { createRadialGradient:()=>({addColorStop(){}}),fillRect(){draws++},beginPath(){},arc(){},fill(){} };
+  const window = {addEventListener(){},wallpaperRegisterAudioListener(listener){audioListener=listener}};
+  const context = {window,document:{getElementById:()=>({getContext:()=>ctx})},innerWidth:1280,innerHeight:720,devicePixelRatio:1,performance:{now:()=>0},requestAnimationFrame:callback=>{nextFrame=callback},Math,Number,String,Object,Boolean};
+  vm.runInNewContext(source,context);
+  assert.equal(typeof audioListener,'function'); assert.equal(window.__weDiagnostics.ready,true);
+  const listener = window.wallpaperPropertyListener;
+  listener.applyUserProperties({speed:{value:0},audio:{value:false}});
+  assert.equal(window.__weDiagnostics.settings.speed,0);
+  assert.equal(window.__weDiagnostics.settings.audio,false);
+  audioListener(Array(128).fill(0.5)); assert.equal(window.__weDiagnostics.audioCallbacks,1);
+  listener.applyGeneralProperties({fps:10});
+  const initial = draws; nextFrame(50); assert.equal(draws,initial); nextFrame(110); assert.equal(draws,initial+1);
+  listener.setPaused(true); nextFrame(300); assert.equal(draws,initial+1);
+  listener.setPaused(false); nextFrame(500); assert.equal(draws,initial+2);
+});
