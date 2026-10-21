@@ -30,7 +30,9 @@ test('managed source lifecycle: create, validate, checkpoint, conflict, undo and
   assert.notEqual(b.revision,a.revision);
   await assert.rejects(projects.apply(a.projectId,a.revision,[{path:'notes.txt',content:'stale'}]),{code:'REVISION_CONFLICT'});
   const recoveredProjects = new Projects({workspace,projectRoots:[],timeoutMs:1000});
+  await projects.unlock(); await recoveredProjects.init();
   const c = await recoveredProjects.restore(a.projectId,b.checkpointId,b.revision);
+  await recoveredProjects.unlock(); await projects.init();
   assert.equal(c.revision,a.revision);
   await assert.rejects(projects.apply(a.projectId,c.revision,[{path:'index.html',content:null}]),{code:'VALIDATION_FAILED'});
   await assert.rejects(projects.apply(a.projectId,c.revision,[{path:'INDEX.html',content:'alias'}]),{code:'VALIDATION_FAILED'});

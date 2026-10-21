@@ -13,9 +13,11 @@ const projects = new Projects(config), engine = new Engine(config, projects);
 if (process.argv.includes('--probe')) {
   console.log(json(await engine.probe()));
 } else {
-  await projects.init();
+  try { await projects.init(); }
+  catch(e) { if (!(e instanceof Fault) || e.code !== 'WORKSPACE_LOCKED') throw e; }
   // ponytail: serialize all tools in one process; use per-project queues if throughput becomes a real requirement.
   let queue: Promise<unknown> = Promise.resolve();
+  let stopping = false;
   const serialize = <T>(work: () => Promise<T>) => { const task = queue.then(work); queue = task.catch(() => {}); return task; };
   const pid = z.string().min(1).max(300), rev = z.string().regex(/^[a-f0-9]{64}$/), values = z.record(z.string(), z.union([z.string().max(4096), z.number().finite(), z.boolean()]));
   const output = (value: Record<string, unknown>): CallToolResult => ({ content: [{ type: 'text', text: json(value) }], structuredContent: value });
@@ -24,6 +26,8 @@ if (process.argv.includes('--probe')) {
     function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, handler: (args: z.infer<z.ZodObject<S>>) => Promise<any>, readOnly = false) {
       server.registerTool(name, { description, inputSchema: z.object(shape), annotations: { readOnlyHint: readOnly, destructiveHint: false, openWorldHint: false } }, async args => serialize(async () => {
         try {
+          if (stopping) throw new Fault('SERVER_STOPPING','Server is shutting down; no new tool operation will be started.');
+          if (name !== 'we_workspace_diagnose') await projects.lock.assertOwned();
           const result = await handler(args);
           if (result?.report && result?.images) {
             const response = output(result.report);
@@ -37,7 +41,8 @@ if (process.argv.includes('--probe')) {
         }
       }));
     }
-    tool('we_environment_probe','Read configured engine version and actual capability evidence. Does not change engine settings.',{},() => engine.probe(),true);
+    tool('we_workspace_diagnose','Read only the configured workspace lock, recorded owner and local process start identity. Available even when workspace acquisition fails. Unknown means unproven, not stale. No unlock, process termination or recovery.',{},() => projects.lock.diagnose(),true);
+    tool('we_environment_probe','Read configured engine version and actual capability evidence. Requires workspace ownership. Does not change engine settings.',{},() => engine.probe(),true);
     tool('we_project_list','Discover projects only beneath configured roots; external sources are read-only.', { type: z.enum(['web','scene','video']).optional(), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }, a => projects.list(a.type,a.offset,a.limit),true);
     tool('we_project_inspect','Return content revision, manifest, bounded file inventory and optionally up to 256 KiB of requested source text.',{ projectId: pid, readFiles: z.array(z.string()).max(20).default([]) },a => projects.inspect(a.projectId,a.readFiles),true);
     tool('we_project_create','Create bundled Web starfield or native Scene orbit with source PNG, compiled TEX and property-bound SceneScript. sourceProjectId imports a copy instead of the template. Copies strip workshopid; each new project requires runtime validation.',{ name:z.string(), title:z.string().min(1).max(200), templateId:z.enum(['web-starfield','scene-orbit']).default('web-starfield'), properties:values.default({}), sourceProjectId:pid.optional() },a => projects.create(a.name,a.title,a.properties,a.sourceProjectId,a.templateId));
@@ -53,13 +58,17 @@ if (process.argv.includes('--probe')) {
     return server;
   };
   const handle = serveStdio(factory,{ onerror:e => console.error(e.message) });
-  let stopping = false;
   async function shutdown() {
     if (stopping) return; stopping = true;
     await queue;
-    for (const failure of await engine.shutdown()) console.error(failure);
-    await handle.close(); await projects.unlock();
+    try {
+      if (projects.lock.isOwner) {
+        await projects.lock.assertOwned();
+        for (const failure of await engine.shutdown()) console.error(failure);
+        await projects.unlock();
+      }
+    } finally { await handle.close(); }
   }
   process.stdin.on('end',() => { void shutdown().catch(e => { console.error(e); process.exitCode = 1; }); });
-  for (const signal of ['SIGINT','SIGTERM'] as const) process.on(signal,() => { void shutdown().then(() => process.exit(0)); });
+  for (const signal of ['SIGINT','SIGTERM'] as const) process.on(signal,() => { void shutdown().then(() => process.exit(0),e => {console.error(e);process.exit(1)}); });
 }

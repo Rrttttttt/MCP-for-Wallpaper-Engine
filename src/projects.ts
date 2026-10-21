@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { WorkspaceLock } from './workspace.js';
 import { Fault, type Config, type Files, readTree, revision, manifest, safeJoin, noLinks, writeTree, atomicWrite, hash, json, relativeFile } from './files.js';
 
 export function checkProperties(definitions: Record<string, any>, values: Record<string, unknown>) {
@@ -108,17 +109,17 @@ export function validate(files: Files) {
 }
 
 export class Projects {
-  constructor(public config: Config) {}
+  readonly lock:WorkspaceLock;
+  constructor(public config: Config) { this.lock=new WorkspaceLock(config.workspace); }
   get root() { return path.join(this.config.workspace, 'projects'); }
   async init() {
-    await noLinks(this.config.workspace);
-    await fs.mkdir(this.root, { recursive: true });
-    // One process owns a workspace; a second writer must use another workspace.
-    try { await fs.mkdir(path.join(this.config.workspace, 'server.lock')); }
-    catch(e) { if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Fault('WORKSPACE_LOCKED', 'Workspace in use, or stale server.lock after a crash. Check the old process before removing that lock.'); throw e; }
+    await this.lock.acquire();
+    try { await fs.mkdir(this.root, { recursive: true }); }
+    catch(e) { await this.lock.release(); throw e; }
   }
-  async unlock() { await fs.rmdir(path.join(this.config.workspace, 'server.lock')); }
+  async unlock() { await this.lock.release(); }
   async resolve(id: string, write = false) {
+    await this.lock.assertOwned();
     const [source, ...parts] = id.split('/');
     let root: string | undefined;
     if (source === 'managed') root = this.root;
@@ -129,6 +130,7 @@ export class Projects {
     return safeJoin(root, parts.join('/'));
   }
   async list(type?: string, offset = 0, limit = 50) {
+    await this.lock.assertOwned();
     const items: any[] = [], warnings: string[] = [];
     const seen = new Set<string>();
     let visited = 0;
@@ -184,6 +186,7 @@ export class Projects {
     return this.inspect(id);
   }
   async checkpoint(id: string, files: Files) {
+    await this.lock.assertOwned();
     const checkpointId = randomUUID(), root = path.join(this.config.workspace, 'checkpoints', checkpointId);
     await writeTree(path.join(root, 'files'), files);
     await atomicWrite(path.join(root, 'record.json'), json({ projectId: id, revision: revision(files), createdAt: new Date().toISOString() }));

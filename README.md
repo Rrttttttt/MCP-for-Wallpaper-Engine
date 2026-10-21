@@ -42,6 +42,22 @@ node dist/index.js
 
 本机集成测试要求在正常用户权限下访问引擎。受限沙箱可能使 CEF 无法写入自身配置目录，出现 `ProcessSingleton ... Error code: 5`；这是实际遇到的环境限制。
 
+### 工作区锁诊断
+
+一个工作区只允许一个持有锁的服务会话。锁冲突时，服务仍可完成 MCP 握手；调用 `we_workspace_diagnose`，参数为 `{}`：
+
+```json
+{"name":"we_workspace_diagnose","arguments":{}}
+```
+
+返回 `workspace`、`mode`、`lock`、`holder` 和 `recovery`。`mode: "owner"` 表示当前会话仍持有原锁；`"diagnostic"` 表示仅可诊断，其余 13 个工具均返回 `WORKSPACE_LOCKED`。原锁发生变化或不可读时，原持有会话的普通操作返回 `WORKSPACE_OWNERSHIP_LOST`，不会自动解锁。
+
+新锁在 `server.lock/owner.json` 记录 PID、主机、平台、随机会话标识和进程启动身份。Windows 使用系统自带 PowerShell 只读查询 `Process.StartTime`，无需截图 helper；查询有 3 秒期限。旧空锁、记录损坏、异地主机、权限不足或查询失败均保持 `holder.state: "unknown"`。`"alive"`、`"exited"`、`"pid-reused"` 是采样时的身份核对结果；其中 PID 复用表示启动时间不匹配，不是只凭 PID 推断。`lock.fingerprint` 可用于识别两次诊断间的变化，不授予解锁权限。
+
+**受控恢复尚未实现**，`recovery.available` 固定为 `false`。即使持有者显示退出，诊断会话也不会取得写入权；原服务正常退出释放锁后，需要重新启动会话才能尝试获取锁。不要按锁的年龄或空目录直接删锁。旧空锁缺少历史归属信息，本接口不能补造所有权证据。
+
+诊断只访问配置指定的工作区，不接受任意路径或 PID，不终止进程，不接管旧预览。元数据读取限制为 8 KiB，链接、额外硬链接及异常目录内容被拒绝或保守报告；非 Windows 的进程身份查询尚未实现。`--probe` 仍只用于引擎环境探测，不能代替此 MCP 工具。实测范围与后续恢复边界见 [锁诊断记录](docs/workspace-lock-incident.md)。
+
 ### 可选原生窗口截图
 
 原生截图需要 Windows x64、.NET 10 x64 运行时；构建另需 .NET 10 SDK。本机验证使用 SDK 10.0.301、Windows 11 build 26100 和引擎 2.8.42。其他系统尚未实测。Windows SDK 投影版本固定为 10.0.19041.57。
@@ -64,6 +80,7 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 
 | 工具 | 行为 |
 | --- | --- |
+| `we_workspace_diagnose` | 即使锁冲突也可读取配置工作区的锁指纹、持有者记录和进程身份；不恢复、不删除锁 |
 | `we_environment_probe` | 返回版本、CEF 发现状态和未验证能力，不修改引擎设置 |
 | `we_project_list` | 在配置目录内有界发现工程，去重并分页 |
 | `we_project_inspect` | 返回源码 revision、元数据、文件哈希；可用 `readFiles` 读取文本 |
@@ -149,7 +166,7 @@ node scripts/verify-engine.mjs
 
 `node scripts/verify-scene.mjs` 通过真实 STDIO MCP 创建新 Scene 工程，以纯文本模式采集原生截图，测量图案的青色像素位置，验证实际运动、参数响应、编辑/回滚/重开、固定副本隔离及服务重启后的持久检查点。它会启动两个先后运行的 MCP 服务，测试正常退出时的窗口和锁回收；异常清理失败也会令脚本失败。报告位于 `.we-mcp/scene-verification/report.json`，包含调用、测量、文件哈希校验与服务进程记录。检查图案位置而非仅比较整张 PNG，避免把标题栏变化当作动画；这仍不是通用画面质量评价或 Scene 错误收集。
 
-`.we-mcp` 和本机配置不会进入 Git。应单独备份受管源工程；工坊上传不能替代源工程备份。一个工作区只允许一个服务进程；崩溃留下 `server.lock` 时，先确认旧进程已退出，再移除这个空锁目录。`active-previews.json` 记录了预览窗口名称，便于异常退出后人工回收。
+`.we-mcp` 和本机配置不会进入 Git。应单独备份受管源工程；工坊上传不能替代源工程备份。锁冲突时先通过 `we_workspace_diagnose` 保留并核对证据，当前没有自动回收或强制解锁工具。`active-previews.json` 记录了预览窗口名称，便于异常退出后核对；它不证明窗口已不存在，也不授予新会话控制旧窗口的权限。
 
 多文件写入不具备跨进程原子性：服务会序列化调用、检查写入前后的哈希，并保存 checkpoint 和 operation journal。中途遇到错误返回 `RECOVERY_REQUIRED`，保留现场；重新 inspect 后可用检查点恢复。外部编辑器不应同时写同一受管工程。
 
