@@ -62,8 +62,49 @@ export function validate(files: Files) {
     const defs = p.general?.properties ?? {};
     checkProperties(defs, Object.fromEntries(Object.entries(defs).filter(([, d]: any) => ['slider','bool','textinput','color','combo'].includes(d.type)).map(([k,d]: any) => [k,d.value])));
   } catch(e) { errors.push((e as Error).message); }
-  if (String(p.type).toLowerCase() === 'scene') warnings.push('Scene format, compiled assets and dynamic asset registration require official editor validation.');
-  return { valid: errors.length === 0, errors, warnings: [...new Set(warnings)], engineVerification: 'unverified', limitations: ['Static reference checks cover HTML/CSS; arbitrary JS, shader and Scene dependencies require runtime/editor verification.', 'JavaScript syntax and CEF compatibility require runtime validation.'] };
+  const sceneDependencies: { path: string; status: 'local' | 'unresolved'; kind: string }[] = [];
+  if (String(p.type).toLowerCase() === 'scene') {
+    warnings.push('Scene scripts, engine-provided shaders/assets and dynamic dependencies still require official engine/editor verification.');
+    const seen = new Set<string>();
+    const dependency = (ref: unknown, kind: string) => {
+      if (typeof ref !== 'string') { warnings.push(`Unsupported Scene ${kind} binding; requires engine verification.`); return; }
+      try { relativeFile(ref); } catch { errors.push(`Unsafe Scene ${kind} reference: ${ref}`); return; }
+      if (seen.has(ref)) return;
+      if (seen.size >= 2000) { warnings.push('Scene dependency inspection truncated at 2000 references.'); return; }
+      seen.add(ref);
+      sceneDependencies.push({path:ref,kind,status:files.has(ref) ? 'local' : 'unresolved'});
+      // Imported scenes can legitimately reference the installation's shared assets.
+      if (!files.has(ref)) warnings.push(`Unresolved Scene ${kind}: ${ref}; may require engine assets.`);
+      return files.get(ref);
+    };
+    try {
+      const scene = JSON.parse(files.get(p.file)?.toString() ?? 'null');
+      if (!scene || !Array.isArray(scene.objects)) errors.push('Scene entry must contain an objects array.');
+      else for (const object of scene.objects.slice(0,2000)) {
+        if (!object?.image) continue;
+        const model = dependency(object.image,'image model');
+        if (!model) continue;
+        const material = dependency(JSON.parse(model.toString()).material,'material');
+        if (!material) continue;
+        const passes = JSON.parse(material.toString()).passes;
+        if (!Array.isArray(passes)) { warnings.push('Unsupported Scene material passes; requires engine verification.'); continue; }
+        if (passes.length > 64) warnings.push('Scene material inspection truncated at 64 passes.');
+        for (const pass of passes.slice(0,64)) {
+          if (!Array.isArray(pass?.textures)) continue;
+          if (pass.textures.length > 32) warnings.push('Scene material inspection truncated at 32 textures per pass.');
+          for (const texture of pass.textures.slice(0,32)) {
+            if (typeof texture !== 'string' || texture.startsWith('_rt_')) continue;
+            const ref = `materials/${texture.replace(/\.tex$/i,'')}.tex`;
+            const compiled = dependency(ref,'texture');
+            if (compiled && !/^TEXV\d{4}\x00/.test(compiled.subarray(0,9).toString('ascii'))) errors.push(`Invalid compiled texture header: ${ref}`);
+            if (!files.has(ref) && ['png','jpg','jpeg','tga'].some(extension => files.has(ref.replace(/\.tex$/i,'.'+extension)))) errors.push(`Local Scene texture source requires compilation: ${ref}`);
+          }
+        }
+      }
+      if (scene?.objects?.length > 2000) warnings.push('Scene dependency inspection truncated at 2000 objects.');
+    } catch { errors.push('Cannot inspect Scene image dependencies; check scene, model and material JSON structure.'); }
+  }
+  return { valid: errors.length === 0, errors, warnings: [...new Set(warnings)], ...(String(p.type).toLowerCase() === 'scene' ? {sceneDependencies} : {}), engineVerification: 'unverified', limitations: ['Static reference checks cover HTML/CSS and local Scene image-model/material/texture chains; arbitrary scripts, shaders and other Scene layer types require runtime/editor verification.', 'JavaScript syntax and runtime compatibility require engine validation.'] };
 }
 
 export class Projects {
@@ -124,10 +165,11 @@ export class Projects {
     }
     return { projectId: id, path: root, revision: revision(files), manifest: p, files: [...files].map(([name,data]) => ({ name, bytes: data.length, sha256: hash(data) })), contents, validation: validate(files) };
   }
-  async create(name: string, title: string, properties: Record<string, unknown> = {}, sourceProjectId?: string) {
+  async create(name: string, title: string, properties: Record<string, unknown> = {}, sourceProjectId?: string, templateId: 'web-starfield' | 'scene-orbit' = 'web-starfield') {
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) throw new Fault('INVALID_NAME', 'Name must use lowercase ASCII letters, digits and hyphens.');
+    if (!['web-starfield','scene-orbit'].includes(templateId)) throw new Fault('INVALID_TEMPLATE','Unknown bundled template.');
     const id = `managed/${name}`, target = await this.resolve(id, true);
-    const files = sourceProjectId ? await readTree(await this.resolve(sourceProjectId)) : await readTree(fileURLToPath(new URL('../templates/web-starfield/', import.meta.url)));
+    const files = sourceProjectId ? await readTree(await this.resolve(sourceProjectId)) : await readTree(fileURLToPath(new URL(`../templates/${templateId}/`, import.meta.url)));
     const p = manifest(files);
     p.title = title; delete p.workshopid;
     checkProperties(p.general?.properties ?? {}, properties);
@@ -138,7 +180,7 @@ export class Projects {
     // Exclusive destination creation prevents accidental overwrites.
     await fs.mkdir(target);
     await writeTree(target, files);
-    await atomicWrite(path.join(this.config.workspace, 'origins', name + '.json'), json({ sourceProjectId: sourceProjectId ?? null, templateId: sourceProjectId ? null : 'web-starfield', createdAt: new Date().toISOString(), sourceRevision: revision(files) }));
+    await atomicWrite(path.join(this.config.workspace, 'origins', name + '.json'), json({ sourceProjectId: sourceProjectId ?? null, templateId: sourceProjectId ? null : templateId, createdAt: new Date().toISOString(), sourceRevision: revision(files) }));
     return this.inspect(id);
   }
   async checkpoint(id: string, files: Files) {

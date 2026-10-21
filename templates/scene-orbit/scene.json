@@ -1,0 +1,61 @@
+{
+  "camera": {
+    "center": "0.00000 0.00000 -1.00000",
+    "eye": "0.00000 0.00000 0.00000",
+    "up": "0.00000 1.00000 0.00000"
+  },
+  "general": {
+    "ambientcolor": "0.00000 0.00000 0.00000",
+    "bloom": false,
+    "bloomhdrfeather": 0.1,
+    "bloomhdriterations": 8,
+    "bloomhdrscatter": 1.619,
+    "bloomhdrstrength": 2,
+    "bloomhdrthreshold": 1,
+    "bloomstrength": 2,
+    "bloomthreshold": 0.64999998,
+    "bloomtint": "1.00000 1.00000 1.00000",
+    "camerafade": false,
+    "cameraparallax": false,
+    "cameraparallaxamount": 0.5,
+    "cameraparallaxdelay": 0.1,
+    "cameraparallaxmouseinfluence": 0.5,
+    "camerapreview": true,
+    "camerashake": false,
+    "camerashakeamplitude": 0.5,
+    "camerashakeroughness": 1,
+    "camerashakespeed": 3,
+    "clearcolor": "0.01500 0.02500 0.06000",
+    "clearenabled": true,
+    "farz": 10000,
+    "fov": 50,
+    "gravitydirection": "0.00000 -1.00000 0.00000",
+    "gravitystrength": 1,
+    "hdr": false,
+    "nearz": 0.0099999998,
+    "orthogonalprojection": {
+      "height": 720,
+      "width": 1280
+    },
+    "perspectiveoverridefov": 95,
+    "skylightcolor": "0.00000 0.00000 0.00000",
+    "winddirection": "0.70700 0.70700 0.00000",
+    "windenabled": false,
+    "windstrength": 1,
+    "zoom": 1
+  },
+  "objects": [
+    {
+      "disablepropagation": false,
+      "id": 1,
+      "image": "models/mcp_orb.json",
+      "name": "Orbit marker",
+      "origin": {
+        "script": "'use strict';\nlet base;\nlet phase = 0;\n\nexport function init(value) {\n    base = value.copy();\n    return value;\n}\n\nexport function update(value) {\n    phase = (phase + engine.frametime * engine.userProperties.speed * Math.PI * 2) % (Math.PI * 2);\n    value.x = base.x + Math.sin(phase) * engine.userProperties.amplitude;\n    value.y = base.y;\n    value.z = base.z;\n    return value;\n}\n",
+        "value": "640.00000 360.00000 0.00000"
+      },
+      "size": "256.00000 256.00000"
+    }
+  ],
+  "version": 5
+}

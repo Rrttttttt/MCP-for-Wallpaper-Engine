@@ -20,6 +20,10 @@ test('real stdio handshake, 12 tools, project create/apply/error and clean shutd
   assert.equal(created.isError,undefined);
   const project = created.structuredContent;
   assert.equal(project.validation.valid,true);
+  const scene = await client.callTool({name:'we_project_create',arguments:{name:'scene',title:'Native Scene',templateId:'scene-orbit'}});
+  assert.equal(scene.isError,undefined);
+  assert.equal(scene.structuredContent.manifest.type,'scene');
+  assert.equal(scene.structuredContent.validation.sceneDependencies.every(d=>d.status==='local'),true);
   const changed = await client.callTool({name:'we_project_apply',arguments:{projectId:project.projectId,expectedRevision:project.revision,changes:[{path:'note.txt',content:'hello'}]}});
   assert.ok(changed.structuredContent.checkpointId);
   const conflict = await client.callTool({name:'we_project_apply',arguments:{projectId:project.projectId,expectedRevision:project.revision,changes:[{path:'note.txt',content:'stale'}]}});

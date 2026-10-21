@@ -55,7 +55,7 @@ export class Engine {
     return { platform: process.platform, executable, version, capabilities: {
       cli: { status: executable && process.platform === 'win32' ? 'unverified' : 'unavailable', reason: cliReason ?? 'Executable found; command receipt and rendering require an actual preview.' },
       cefDiscovery: cdp, nativeWindowCapture,
-      sceneAuthoring: { status: 'unverified', reason: 'Requires a real editor-created source template and reload validation.' }
+      sceneAuthoring: { status: 'limited', templates:['scene-orbit'], reason: 'Bundled image layer with source PNG, compiled TEX and property-bound SceneScript. Each project still requires engine/editor verification; arbitrary Scene authoring is not implemented.' }
     } };
   }
   private get(id: string) {

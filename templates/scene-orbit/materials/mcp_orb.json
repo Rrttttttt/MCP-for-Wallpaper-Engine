@@ -1,0 +1,13 @@
+{
+  "passes": [
+    {
+      "shader": "genericimage4",
+      "textures": [ "mcp_orb" ],
+      "blending": "translucent",
+      "cullmode": "nocull",
+      "depthtest": "disabled",
+      "depthwrite": "disabled",
+      "combos": {}
+    }
+  ]
+}

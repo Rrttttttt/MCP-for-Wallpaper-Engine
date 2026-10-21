@@ -1,6 +1,6 @@
 # Wallpaper Engine MCP
 
-Windows 本地 STDIO MCP 服务，用于制作可保存的 Wallpaper Engine 源工程，并通过官方引擎获取运行反馈。支持 Web 创作、CEF 和自有原生窗口截图；原生 Scene 作者能力尚未通过验收。
+Windows 本地 STDIO MCP 服务，用于制作可保存的 Wallpaper Engine 源工程，并通过官方引擎获取运行反馈。支持 Web 创作、基础 Scene 模板、CEF 和自有原生窗口截图；复杂 Scene 作者能力仍待开发。
 
 ## 启动
 
@@ -67,10 +67,10 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 | `we_environment_probe` | 返回版本、CEF 发现状态和未验证能力，不修改引擎设置 |
 | `we_project_list` | 在配置目录内有界发现工程，去重并分页 |
 | `we_project_inspect` | 返回源码 revision、元数据、文件哈希；可用 `readFiles` 读取文本 |
-| `we_project_create` | 用 `web-starfield` 创建工程，或用 `sourceProjectId` 导入受管副本；移除旧 workshopid |
+| `we_project_create` | 用 `web-starfield` 或 `scene-orbit` 创建工程，或用 `sourceProjectId` 导入受管副本；移除旧 workshopid |
 | `we_project_apply` | 按 `expectedRevision` 写入 UTF-8 文件或删除文件，先静态检查并保存检查点 |
 | `we_project_restore` | 恢复指定检查点，校验归属、内容哈希和当前 revision |
-| `we_project_validate` | 检查 JSON、入口、HTML/CSS 本地引用和音频开关；不冒充真实引擎验证 |
+| `we_project_validate` | 检查 JSON、入口、HTML/CSS 引用、音频开关及 Scene 本地图片层依赖；不冒充真实引擎验证 |
 | `we_preview_open` | 从固定源码副本打开唯一命名窗口，返回就绪证据或未验证状态 |
 | `we_preview_set_properties` | 校验类型及范围后修改该预览的公开参数，不修改源码默认值 |
 | `we_preview_observe` | 采集 1–3 张 PNG；默认只返回文本诊断和文件路径；`includeImages:true` 才附带有界图像内容；`backend:auto/cef/native` 选择捕获路径 |
@@ -87,6 +87,26 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 6. 通过多帧检查后执行发布准备，检查预览图、动态资源、素材权利和元数据，再用官方编辑器导入、发布。
 
 版本冲突返回 `REVISION_CONFLICT`，应重新 inspect 后再修改。成功修改返回 `checkpointId`；无变化的调用返回 `checkpointId: null`。错误通过 MCP `isError` 和结构化错误代码返回。
+
+## 基础 Scene 模板
+
+`we_project_create` 传入 `templateId: "scene-orbit"` 可创建 1280×720 Scene：一个原创青色图片层在深色背景上水平运动。`properties` 支持 `speed`（0–2，圈/秒）和 `amplitude`（0–400，场景像素）；幅度为 0 时回到中点，速度为 0 时保持当前相位。图案 PNG、`.tex-json` 编译配置和 `.tex` 产物均随工程保存，没有网络素材依赖。
+
+Scene 的 Origin 属性内联绑定 SceneScript，源码位于 `scene.json` 的 `objects[0].origin.script`。脚本通过 `engine.frametime` 累积相位，从 `engine.userProperties.speed/amplitude` 读取当前值，不逐帧叠加位置。不要把 Web 的 `window.wallpaperPropertyListener` 搬到 Scene 中。
+
+模板结构已由本机官方编辑器 2.8.42 打开、保存并回读，最终脚本保持不变；官方引擎独立窗口已实测图片、连续运动、幅度归零/恢复和速度归零。当前实现使用直接属性读取，是因为本机实测仅依赖 `applyUserProperties` 回调时参数未生效；没有把该观察外推为所有版本的回调行为。
+
+模板自带 TEX，创建和预览无需再次编译。修改源 PNG 或编译配置后，可重新生成模板纹理：
+
+```powershell
+npm.cmd run build:scene-assets
+```
+
+此开发脚本读取本机配置中的 `installDir`，调用官方 `bin/resourcecompiler64.exe -tex -i ... -o ...`。它在独立临时工程中编译，通过头部和尺寸限制检查后才替换模板 TEX，并输出编译器、源图与产物 SHA-256。松散 PNG 在本机曾使编译器超时，所以保留完整工程和 `materials` 目录布局。编译器未随仓库分发；该调用方式仅在当前安装版本验证。脚本更新的是仓库模板，不会自动更新已经创建的工程副本。
+
+Scene 静态检查返回 `sceneDependencies`，遍历本地 `image → model.material → passes.textures → TEX`，检查危险路径、TEX 头部和“有源图但缺少编译纹理”的情况。安装目录共享资产无法仅从工程内容确认，因此未解析引用保留为警告；`valid: true` 不表示所有依赖完整或脚本正确。检查上限为 2000 对象/引用、每材质 64 pass、每 pass 32 纹理，超限明确告警。粒子、3D 模型、自定义 shader、动态资产和完整 TEX 解码尚不在静态检查范围内。
+
+`scene-orbit` 使用引擎自带 `genericimage4` shader，离线运行仍依赖已安装的官方引擎。模板不含第三方壁纸图片、工坊 ID 或外部播放器代码。
 
 ## CEF 与当前版本差异
 
@@ -112,12 +132,16 @@ node scripts/verify-engine.mjs
 
 构建原生 helper 后，运行 `node scripts/verify-native.mjs`，验证无 CEF 的原生截图、默认纯文本返回、显式图像块、多帧变化、重载、真实窗口消失，以及篡改身份、伪造同名窗口、最小化、窗口改名和查找超时的拒绝行为。报告位于 `.we-mcp/native-verification/report.json`。此脚本会短暂打开本轮创建的测试窗口，只操作这些窗口；必须在正常交互用户会话中运行。
 
+`node scripts/verify-scene.mjs` 通过真实 STDIO MCP 创建新 Scene 工程，以纯文本模式采集原生截图，测量图案的青色像素位置，验证实际运动、参数响应及窗口回收。报告位于 `.we-mcp/scene-verification/report.json`。检查图案位置而非仅比较整张 PNG，避免把标题栏变化当作动画；这仍不是通用画面质量评价或 Scene 错误收集。
+
 `.we-mcp` 和本机配置不会进入 Git。应单独备份受管源工程；工坊上传不能替代源工程备份。一个工作区只允许一个服务进程；崩溃留下 `server.lock` 时，先确认旧进程已退出，再移除这个空锁目录。`active-previews.json` 记录了预览窗口名称，便于异常退出后人工回收。
 
 多文件写入不具备跨进程原子性：服务会序列化调用、检查写入前后的哈希，并保存 checkpoint 和 operation journal。中途遇到错误返回 `RECOVERY_REQUIRED`，保留现场；重新 inspect 后可用检查点恢复。外部编辑器不应同时写同一受管工程。
 
 首版限制：工程上限 64 MiB / 2000 文件，单次文本读取 256 KiB，单文件文本修改 1 MiB。拒绝隐藏路径、node_modules、Windows 特殊文件名和符号链接/目录联接；因此应导入运行工程目录，而不是含开发依赖的仓库根目录。运行产生的历史副本和截图暂不自动清理。
 
-尚未完成 Scene 模板验收、真实系统音频和媒体会话验收、UI 自动化及工坊上传。原生捕获已验证 Web 独立窗口，不代表 Scene 作者工作流已验收。静态依赖检查不能穷尽任意 JavaScript/Scene 动态引用；发布准备仍需检查预览图和依赖。
+尚未完成 Scene 编辑/回滚/重开全闭环验收、复杂 Scene 工具、真实系统音频和媒体会话验收、通用 UI 自动化及工坊上传。基础 Scene 模板通过不代表任意 Scene 作者工作流已验收。静态依赖检查不能穷尽任意 JavaScript/Scene 动态引用；发布准备仍需检查预览图和依赖。
 
 接口依据：[官方 CLI](https://help.wallpaperengine.io/en/functionality/cli.html)、[Web 属性](https://docs.wallpaperengine.io/en/web/customization/properties.html)、[音频](https://docs.wallpaperengine.io/en/web/audio/visualizer.html)、[调试入口](https://docs.wallpaperengine.io/en/web/debug/debug.html)、[官方 MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)。版本兼容结论以本仓库的本机实测记录为准。
+
+Scene 依据：[官方 SceneScript 引用与类型定义](https://docs.wallpaperengine.io/en/scene/scenescript/reference.html)、[IEngine 属性](https://docs.wallpaperengine.io/en/scene/scenescript/reference/class/IEngine.html)、[update 与帧时间](https://docs.wallpaperengine.io/en/scene/scenescript/reference/event/update.html)、[开发者公开的资源编译命令](https://steamcommunity.com/app/431960/discussions/2/340412122401455740/)。新增实现使用当前安装版编辑器保存结果与实际编译/运行证据，没有依赖第三方播放器的兼容性声明。
