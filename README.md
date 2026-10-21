@@ -71,7 +71,7 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 | `we_project_apply` | 按 `expectedRevision` 写入 UTF-8 文件或删除文件，先静态检查并保存检查点 |
 | `we_project_restore` | 恢复指定检查点，校验归属、内容哈希和当前 revision |
 | `we_project_validate` | 检查 JSON、入口、HTML/CSS 引用、音频开关及 Scene 本地图片层依赖；不冒充真实引擎验证 |
-| `we_preview_open` | 从固定源码副本打开唯一命名窗口，返回就绪证据或未验证状态 |
+| `we_preview_open` | 从固定源码副本打开唯一命名窗口；每个服务会话最多登记一个 Web，Scene 可共存；返回就绪证据或未验证状态 |
 | `we_preview_set_properties` | 校验类型及范围后修改该预览的公开参数，不修改源码默认值 |
 | `we_preview_move_mouse` | 向自有 Web CEF 预览派发鼠标移动；`x/y` 为 0～1 的归一化坐标，左上 `(0,0)`、右下 `(1,1)`；不移动系统光标 |
 | `we_preview_observe` | 采集 1–3 张 PNG；默认只返回文本诊断和文件路径；`includeImages:true` 才附带有界图像内容；`backend:auto/cef/native` 选择捕获路径 |
@@ -83,7 +83,7 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 1. 用 `we_project_create` 创建 `managed/my-wallpaper`。当前模板支持速度、密度、音频开关、星体颜色，运行文件无网络依赖。
 2. 用 `we_project_inspect` 获取 revision 与源码；调用 `we_project_apply` 时传入该 revision。`content: null` 表示删除，其他值是文件的完整新内容。
 3. 打开预览并调用 observe；默认只返回文本和原图路径，适合无多模态模型的 CLI。多模态客户端可显式传 `includeImages:true`。`backend:auto` 优先使用已连接 CEF，否则选择原生后端；没有可用后端则返回错误。
-4. 临时调参后，把满意的值写入 `project.json` 的 `general.properties`，再打开新的预览。已有预览始终指向原来的固定源码副本。
+4. 临时调参后，把满意的值写入 `project.json` 的 `general.properties`，再打开新的预览；Web 须先关闭现有 Web 预览。已有预览始终指向原来的固定源码副本。
 5. `we_preview_observe` 的 `reload: true` 会关闭并重开这个预览窗口，从同一源码副本重新初始化宿主。运行参数会恢复为该副本的源码默认值。
 6. 通过多帧检查后执行发布准备，检查预览图、动态资源、素材权利和元数据，再用官方编辑器导入、发布。
 
@@ -93,7 +93,11 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 
 返回 `confirmation: "event-dispatched"` 仅表示 CDP 命令已确认；`visualResponse: "unverified"` 提醒继续 observe 检查画面。检查和派发不是原子操作：期间跳转、调整大小或连接失败可能发生在事件已发出之后，此类错误带 `dispatchAttempted: true`，不保证事件未被接收。本机官方引擎 2.8.42 已通过命令冒烟检查和几何双眼样例验收：页面接收坐标、截图中的方向/幅度/遮罩边缘、原生窗口位移，以及每次调用前后的系统光标位置均有测量。样例通过不代表任意作品的视觉质量通过。调研依据见 [鼠标输入研究](docs/mouse-input-research.md)。
 
-运行 `node scripts/verify-mouse.mjs` 可重现双眼验收，约一分钟保持系统鼠标不动；报告位于 `.we-mcp/mouse-verification/report.json`。脚本使用一个 Web 和一个静止 Scene 对照，顺序测试两种 Web 尺寸；**两个 Web 同时运行尚未通过**：本机第二个预览没有匹配 CEF 页面，调试列表出现异常 HTTP 目标，根因待定位。接口会拒绝没有匹配目标的输入，不作系统光标回退。详细范围和未验收项见 [鼠标实机验收记录](docs/mouse-input-acceptance.md)。
+运行 `node scripts/verify-mouse.mjs` 可重现双眼验收，约一分钟保持系统鼠标不动；报告位于 `.we-mcp/mouse-verification/report.json`。脚本使用一个 Web 和一个静止 Scene 对照，顺序测试两种 Web 尺寸；详细范围见 [鼠标实机验收记录](docs/mouse-input-acceptance.md)。
+
+**两个 Web 同时渲染的本机故障尚未修复**：绕过 MCP、改变等价 CLI 参数、关闭远程调试均未消除第二个 Web 渲染失败。现有证据最符合 CEF 根目录单例行为，但没有直接确认宿主内部实现。服务因此在 CLI 和快照写入之前返回 `WEB_PREVIEW_LIMIT`，列出须先关闭的 `activePreviewIds`；`we_environment_probe` 的 `webPreviewConcurrency` 也公开此限制。关闭失败时仍保留名额，正常关闭后可重开；Scene 可共存。这是**服务会话内限制，不是跨进程互斥**，不能防止其他服务或手动启动的 Web 触发同一引擎故障。服务不会自动更改 CEF 配置、关闭已有预览或退回系统鼠标。[对照证据与源码依据](docs/cef-concurrency-research.md)。
+
+`node scripts/verify-web-limit.mjs` 验证第二个 Web 被拒绝后没有新快照或调试目标、第一个仍能接收鼠标输入，以及关闭后能在 Scene 仍打开时重开 Web。报告位于 `.we-mcp/web-limit-verification/report.json`；这验证限制行为，不代表并发 Web 已通过。
 
 ## 基础 Scene 模板
 

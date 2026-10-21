@@ -55,6 +55,7 @@ export class Engine {
     return { platform: process.platform, executable, version, capabilities: {
       cli: { status: executable && process.platform === 'win32' ? 'unverified' : 'unavailable', reason: cliReason ?? 'Executable found; command receipt and rendering require an actual preview.' },
       cefDiscovery: cdp, nativeWindowCapture,
+      webPreviewConcurrency: { status:'limited',maxActivePerSession:1,scope:'server-session',reason:'Local official-engine/CEF testing reproduced a missing second Web renderer even without remote debugging. Close the registered Web preview before opening another; this is not a cross-process lock.' },
       sceneAuthoring: { status: 'limited', templates:['scene-orbit'], reason: 'Bundled image layer with source PNG, compiled TEX and property-bound SceneScript. Each project still requires engine/editor verification; arbitrary Scene authoring is not implemented.' }
     } };
   }
@@ -107,6 +108,10 @@ export class Engine {
   async open(projectId: string, width: number, height: number) {
     const files = await readTree(await this.projects.resolve(projectId)), report = validate(files);
     if (!report.valid) throw new Fault('VALIDATION_FAILED','Preview source is invalid.',report);
+    if (String(manifest(files).type).toLowerCase() === 'web') {
+      const activePreviewIds = [...this.previews.values()].filter(p => String(manifest(p.files).type).toLowerCase() === 'web').map(p => p.previewId);
+      if (activePreviewIds.length) throw new Fault('WEB_PREVIEW_LIMIT','Close the registered Web preview before opening another. Concurrent Web rendering failed in local official-engine/CEF tests.',{limit:1,scope:'server-session',activePreviewIds});
+    }
     await this.executable();
     const previewId = randomUUID(), windowName = 'WE-MCP-' + previewId;
     const directory = path.join(this.config.workspace,'previews',previewId);
