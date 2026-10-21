@@ -91,7 +91,9 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 
 鼠标移动使用当前页面 `innerWidth/innerHeight`（每边 1～8192 CSS 像素）按 `x*(width-1)`、`y*(height-1)` 换算，不使用含标题栏的原生截图尺寸。仅支持配置 CEF 调试的 Web 预览，Scene 或无调试端口返回 `MOUSE_INPUT_UNSUPPORTED`；目标缺失、歧义或跳转会拒绝。不提供点击、滚轮、键盘或系统光标回退。输入前后校验页面归属，并沿用可用的原生窗口身份校验。
 
-返回 `confirmation: "event-dispatched"` 仅表示 CDP 命令已确认；`visualResponse: "unverified"` 提醒继续 observe 检查画面。检查和派发不是原子操作：期间跳转、调整大小或连接失败可能发生在事件已发出之后，此类错误带 `dispatchAttempted: true`，不保证事件未被接收。本机官方引擎 2.8.42 已通过中心和边角移动命令冒烟检查（`node scripts/verify-engine.mjs`）；页面接收事件、系统光标不移动以及双眼方向/幅度/边缘画面仍待独立验收。调研依据见 [鼠标输入研究](docs/mouse-input-research.md)。
+返回 `confirmation: "event-dispatched"` 仅表示 CDP 命令已确认；`visualResponse: "unverified"` 提醒继续 observe 检查画面。检查和派发不是原子操作：期间跳转、调整大小或连接失败可能发生在事件已发出之后，此类错误带 `dispatchAttempted: true`，不保证事件未被接收。本机官方引擎 2.8.42 已通过命令冒烟检查和几何双眼样例验收：页面接收坐标、截图中的方向/幅度/遮罩边缘、原生窗口位移，以及每次调用前后的系统光标位置均有测量。样例通过不代表任意作品的视觉质量通过。调研依据见 [鼠标输入研究](docs/mouse-input-research.md)。
+
+运行 `node scripts/verify-mouse.mjs` 可重现双眼验收，约一分钟保持系统鼠标不动；报告位于 `.we-mcp/mouse-verification/report.json`。脚本使用一个 Web 和一个静止 Scene 对照，顺序测试两种 Web 尺寸；**两个 Web 同时运行尚未通过**：本机第二个预览没有匹配 CEF 页面，调试列表出现异常 HTTP 目标，根因待定位。接口会拒绝没有匹配目标的输入，不作系统光标回退。详细范围和未验收项见 [鼠标实机验收记录](docs/mouse-input-acceptance.md)。
 
 ## 基础 Scene 模板
 

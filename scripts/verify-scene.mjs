@@ -6,9 +6,9 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { inflateSync } from 'node:zlib';
+import { decodePng } from './png.mjs';
 import { loadConfig, hash } from '../dist/files.js';
-import { pngInfo, nativeCall } from '../dist/native.js';
+import { nativeCall } from '../dist/native.js';
 import { Engine } from '../dist/engine.js';
 import { Projects } from '../dist/projects.js';
 const root = fileURLToPath(new URL('../',import.meta.url));
@@ -53,35 +53,15 @@ async function workspaceReleased() {
   await assert.rejects(fs.access(path.join(directory,'data','server.lock')),{code:'ENOENT'});
 }
 
-// Only decodes the bounded 8-bit RGB/RGBA PNG format used by this integration.
 // Measuring cyan pixels excludes title-bar changes from animation evidence.
 async function marker(file) {
-  const png=await fs.readFile(file),{width,height}=pngInfo(png);
-  assert.equal(png[24],8); assert.ok([2,6].includes(png[25])); assert.equal(png[28],0);
-  const channels=png[25]===6?4:3, stride=width*channels, compressed=[];
-  for(let offset=8;offset+12<=png.length;) {
-    const length=png.readUInt32BE(offset),type=png.toString('ascii',offset+4,offset+8);
-    assert.ok(offset+12+length<=png.length);
-    if(type==='IDAT') compressed.push(png.subarray(offset+8,offset+8+length));
-    offset+=12+length;
-  }
-  const raw=inflateSync(Buffer.concat(compressed),{maxOutputLength:(stride+1)*height});
-  assert.equal(raw.length,(stride+1)*height);
-  let previous=Buffer.alloc(stride),count=0,sumX=0,sumY=0;
+  const {width,height,channels,pixels}=decodePng(await fs.readFile(file));
+  let count=0,sumX=0,sumY=0;
   for(let y=0;y<height;y++) {
-    const filter=raw[y*(stride+1)],row=Buffer.from(raw.subarray(y*(stride+1)+1,(y+1)*(stride+1)));
-    assert.ok(filter<=4);
-    for(let i=0;i<stride;i++) {
-      const left=i>=channels?row[i-channels]:0,up=previous[i],corner=i>=channels?previous[i-channels]:0;
-      const estimate=left+up-corner,a=Math.abs(estimate-left),b=Math.abs(estimate-up),c=Math.abs(estimate-corner);
-      const predictor=filter===0?0:filter===1?left:filter===2?up:filter===3?Math.floor((left+up)/2):a<=b&&a<=c?left:b<=c?up:corner;
-      row[i]=(row[i]+predictor)&255;
-    }
     for(let x=0;x<width;x++) {
-      const i=x*channels;
-      if(row[i]<80&&row[i+1]>140&&row[i+2]>140) {count++;sumX+=x;sumY+=y;}
+      const i=(y*width+x)*channels;
+      if(pixels[i]<80&&pixels[i+1]>140&&pixels[i+2]>140) {count++;sumX+=x;sumY+=y;}
     }
-    previous=row;
   }
   assert.ok(count>5000,'Expected cyan image layer is missing or blank.');
   return {file,width,height,pixels:count,x:sumX/count,y:sumY/count};
