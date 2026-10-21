@@ -4,3 +4,5 @@ dist/
 .we-mcp/
 we.config.json
 *.log
+native/**/bin/
+native/**/obj/

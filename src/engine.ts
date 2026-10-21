@@ -6,11 +6,13 @@ import { randomUUID } from 'node:crypto';
 import { Fault, type Config, type Files, noLinks, readTree, writeTree, revision, manifest, atomicWrite, json } from './files.js';
 import { Projects, validate, checkProperties } from './projects.js';
 import { Cdp, endpoint, findTarget, matchesProject } from './cdp.js';
+import { nativeAvailable, nativeCall, pngInfo, type WindowIdentity } from './native.js';
 
 const execFileAsync = promisify(execFile);
 interface Preview {
   previewId: string; projectId: string; revision: string; directory: string; windowName: string;
   width: number; height: number; cdp?: Cdp; capabilities?: unknown; files: Files;
+  native: boolean; baseline?: string[]; identity?: WindowIdentity;
 }
 export const openArgs = (file: string, name: string, width: number, height: number) => ['-control','openWallpaper','-file',file,'-playInWindow',name,'-width',String(width),'-height',String(height)];
 export const propertyArgs = (name: string, values: Record<string, unknown>) => {
@@ -47,9 +49,12 @@ export class Engine {
       try { cdp = { status: 'supported', discovery: await endpoint(this.config.devtoolsPort, '/json/version'), methods: 'unverified until an owned preview target is connected' }; }
       catch(e) { cdp = { status: 'unavailable', reason: (e as Error).message }; }
     }
+    let nativeWindowCapture: unknown = { status: 'unavailable', reason: 'Build the optional Windows x64 helper with npm run build:native.' };
+    try { if (await nativeAvailable()) nativeWindowCapture = await nativeCall('probe'); }
+    catch(e) { nativeWindowCapture = { status: 'unavailable', reason: (e as Error).message }; }
     return { platform: process.platform, executable, version, capabilities: {
       cli: { status: executable && process.platform === 'win32' ? 'unverified' : 'unavailable', reason: cliReason ?? 'Executable found; command receipt and rendering require an actual preview.' },
-      cefDiscovery: cdp, nativeWindowCapture: { status: 'unavailable', reason: 'Not implemented in this milestone; no full-desktop screenshot fallback.' },
+      cefDiscovery: cdp, nativeWindowCapture,
       sceneAuthoring: { status: 'unverified', reason: 'Requires a real editor-created source template and reload validation.' }
     } };
   }
@@ -82,71 +87,123 @@ export class Engine {
     }
     return { lastError };
   }
+  private nativeRequest(p: Preview) { return { windowName:p.windowName, installDir:this.config.installDir, expected:p.identity }; }
+  private async verifyWindow(p: Preview) {
+    if (!p.native) return;
+    if (!p.identity) p.identity = (await nativeCall('find',{ ...this.nativeRequest(p),baseline:p.baseline },this.config.timeoutMs)).identity;
+    await nativeCall('verify',this.nativeRequest(p),this.config.timeoutMs);
+  }
+  private async launch(p: Preview) {
+    if (p.native) p.baseline = (await nativeCall('baseline')).handles;
+    p.identity = undefined;
+    // Persist before sending the CLI command: even a command timeout can leave a live window.
+    this.previews.set(p.previewId,p);
+    await this.saveRegistry();
+    await this.cli(openArgs(path.join(p.directory,'project.json'),p.windowName,p.width,p.height));
+    await this.verifyWindow(p);
+    await this.saveRegistry();
+  }
   async open(projectId: string, width: number, height: number) {
     const files = await readTree(await this.projects.resolve(projectId)), report = validate(files);
     if (!report.valid) throw new Fault('VALIDATION_FAILED','Preview source is invalid.',report);
+    await this.executable();
     const previewId = randomUUID(), windowName = 'WE-MCP-' + previewId;
     const directory = path.join(this.config.workspace,'previews',previewId);
     await writeTree(directory,files);
-    const p: Preview = { previewId, projectId, revision: revision(files), directory, windowName, width, height, files };
-    await this.cli(openArgs(path.join(directory,'project.json'),windowName,width,height));
-    this.previews.set(previewId,p);
-    await this.saveRegistry();
+    const p: Preview = { previewId, projectId, revision: revision(files), directory, windowName, width, height, files, native:await nativeAvailable() };
+    try { await this.launch(p); }
+    catch(e) { throw new Fault('PREVIEW_OPEN_FAILED',(e as Error).message,{ ...this.info(p),cause:e instanceof Fault ? e.code : 'CLI_FAILED',cleanup:this.previews.has(previewId) ? 'Preview remains registered for close/shutdown.' : 'No command sent; no live preview was registered.' }); }
     let lastError: string | undefined;
-    if (this.config.devtoolsPort) {
+    if (this.config.devtoolsPort && manifest(files).type === 'web') {
       const ready = await this.waitReady(p); lastError = ready.lastError;
       if (ready.evidence) return { ...this.info(p), state: 'page-ready', evidence: ready.evidence, capabilities: p.capabilities, visualVerification: 'unverified until observe and image review' };
     }
     let current: string | undefined;
     try { current = (await this.cli(['-control','getWallpaper','-location',windowName])).stdout; } catch(e) { lastError = (e as Error).message; }
     const matched = !!current && matchesProject(new URL('file:///' + current.replace(/\\/g,'/')).href,directory);
-    return { ...this.info(p), state: matched ? 'path-confirmed-render-unverified' : 'command-sent-unverified', reportedPath: current, lastError, limitations: ['Exit code is not proof of rendering.', 'Use observe after enabling the configured CEF port for images and runtime evidence.'] };
+    return { ...this.info(p), state: p.identity ? 'window-bound-render-unverified' : matched ? 'path-confirmed-render-unverified' : 'command-sent-unverified', reportedPath: current, lastError, limitations: ['Window binding and exit code are not proof of rendering.', 'Use observe to capture frames; Scene script diagnostics remain unavailable.'] };
   }
-  private info(p: Preview) { return { previewId: p.previewId, projectId: p.projectId, revision: p.revision, directory: p.directory, windowName: p.windowName, width: p.width, height: p.height }; }
+  private info(p: Preview) { return { previewId: p.previewId, projectId: p.projectId, revision: p.revision, directory: p.directory, windowName: p.windowName, width: p.width, height: p.height, windowIdentity:p.identity }; }
   private async saveRegistry() {
     await atomicWrite(path.join(this.config.workspace,'active-previews.json'),json([...this.previews.values()].map(p => this.info(p))));
   }
   async setProperties(id: string, properties: Record<string,unknown>) {
     const p = this.get(id);
     checkProperties(manifest(p.files).general?.properties ?? {}, properties);
+    await this.verifyWindow(p);
     await this.cli(propertyArgs(p.windowName,properties));
     return { previewId: id, submitted: properties, confirmation: 'command-sent-unverified', sourceDefaultsChanged: false, nextStep: 'Observe template diagnostics and the actual image.' };
   }
-  async observe(id: string, count = 1, intervalMs = 250, afterCursor = 0, reload = false) {
+  async observe(id: string, count = 1, intervalMs = 250, afterCursor = 0, reload = false, backend: 'auto' | 'cef' | 'native' = 'auto', includeImages = false) {
     const p = this.get(id), images: { path: string; data: string }[] = [], issues: string[] = [];
-    try { await this.bind(p); } catch(e) { issues.push((e as Error).message); }
-    if (!p.cdp) return { report: { ...this.info(p), state: 'unverified', issues: [...issues,'No matching owned CEF target; screenshot and runtime diagnostics unavailable.'], images: [], metrics: null }, images };
     if (reload) {
       // A bare Page.reload in WE 2.8.42 loses host property/FPS callbacks. Recreate only this owned window instead.
-      p.cdp.close(); p.cdp = undefined;
-      await this.cli(['-control','closeWallpaper','-location',p.windowName]);
-      await this.cli(openArgs(path.join(p.directory,'project.json'),p.windowName,p.width,p.height));
-      const ready = await this.waitReady(p);
-      if (!ready.evidence) issues.push(ready.lastError ?? 'Host reload did not produce a ready page.');
-      if (!p.cdp) return { report: { ...this.info(p), state: 'unverified', issues, images: [] }, images };
+      await this.closeWindow(p);
+      p.cdp?.close(); p.cdp = undefined;
+      await this.launch(p);
+      if (this.config.devtoolsPort && manifest(p.files).type === 'web') {
+        const ready = await this.waitReady(p);
+        if (!ready.evidence) issues.push(ready.lastError ?? 'Host reload did not produce a ready page.');
+      }
     }
+    await this.verifyWindow(p);
+    try { await this.bind(p); } catch(e) { issues.push((e as Error).message); }
+    const selected = backend === 'auto' ? (p.cdp ? 'cef' : 'native') : backend;
+    if (selected === 'native' && !p.native) throw new Fault('NATIVE_CAPTURE_UNAVAILABLE','Build the Windows helper before requesting native capture.');
+    if (selected === 'cef' && !p.cdp) throw new Fault('CEF_TARGET_UNAVAILABLE','No matching owned CEF target. Use native capture for Scene or previews without CEF.');
+    const captures: Record<string,unknown>[] = [];
     let evidence: unknown;
     for (let i=0;i<count;i++) {
       if (i) await new Promise(r => setTimeout(r,intervalMs));
       try {
-        const diagnostic = await p.cdp!.diagnostics();
-        if (!matchesProject(diagnostic.url,p.directory)) { p.cdp!.close(); p.cdp = undefined; throw new Fault('TARGET_CHANGED','CEF target navigated outside owned preview.'); }
-        evidence = diagnostic;
-        const screenshot = await p.cdp!.call('Page.captureScreenshot',{ format:'png' });
+        await this.verifyWindow(p);
+        if (p.cdp) {
+          let diagnostic;
+          try { diagnostic = await p.cdp.diagnostics(); }
+          catch(e) {
+            if (selected === 'cef') throw e;
+            issues.push(`CEF diagnostics unavailable: ${(e as Error).message}`);
+            p.cdp.close(); p.cdp = undefined;
+          }
+          if (diagnostic) {
+            if (!matchesProject(diagnostic.url,p.directory)) { p.cdp?.close(); p.cdp = undefined; throw new Fault('TARGET_CHANGED','CEF target navigated outside owned preview.'); }
+            evidence = diagnostic;
+          }
+        }
+        const screenshot = selected === 'native' ? await nativeCall('capture',this.nativeRequest(p),this.config.timeoutMs) : await p.cdp!.call('Page.captureScreenshot',{ format:'png' });
         const data = Buffer.from(screenshot.data, 'base64');
-        if (!data.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])) || data.length > 20*1024*1024) throw new Fault('INVALID_SCREENSHOT','CEF did not return a bounded PNG image.');
+        const dimensions = pngInfo(data);
+        await this.verifyWindow(p);
         const output = path.join(this.config.workspace,'observations',p.previewId,`${Date.now()}-${i}.png`);
         await atomicWrite(output,data);
-        images.push({ path:output,data:data.toString('base64') });
-      } catch(e) { issues.push((e as Error).message); if (!p.cdp) break; }
+        captures.push({ path:output,...dimensions,backend:selected,windowIdentity:p.identity,timestampTicks:screenshot.timestampTicks,dpi:screenshot.dpi,scope:selected === 'native' ? 'window-including-nonclient-area' : 'page',color:selected === 'native' ? screenshot.color : 'CEF PNG; display color fidelity unverified' });
+        if (includeImages) {
+          // Keep MCP payload bounded; full-size files remain available to the user.
+          if (images.reduce((n,image) => n + image.data.length,0) + screenshot.data.length <= 8*1024*1024) images.push({ path:output,data:data.toString('base64') });
+          else issues.push('Inline image budget (8 MiB base64) exceeded; inspect the saved PNG path.');
+        }
+      } catch(e) { issues.push(`${e instanceof Fault ? e.code : 'CAPTURE_FAILED'}: ${(e as Error).message}`); break; }
     }
-    return { report: { ...this.info(p), state: images.length ? 'frames-captured' : 'unverified', evidence, capabilities:p.capabilities, logs:p.cdp?.logs(afterCursor), issues, images:images.map(i => i.path), visualVerification: 'Requires inspection of image content; PNG capture alone does not rule out a blank frame.', performance: 'Diagnostic frame counters are not GPU presentation FPS.' }, images };
+    return { report: { ...this.info(p), state: captures.length ? 'frames-captured' : 'unverified', backend:selected, requestedFrames:count, capturedFrames:captures.length, complete:captures.length === count, evidence, runtimeDiagnostics:p.cdp ? 'CEF diagnostics available' : 'unavailable; native frames do not prove script/asset health', capabilities:p.capabilities, logs:p.cdp?.logs(afterCursor), issues, images:captures.map(i => i.path), captures, inlineImages:images.length, visualVerification: 'Requires inspection of image content; PNG capture alone does not rule out a blank frame.', performance: 'Diagnostic frame counters are not GPU presentation FPS.' }, images };
+  }
+  private async closeWindow(p: Preview) {
+    if (p.native) {
+      try { await this.verifyWindow(p); }
+      catch(e) {
+        // If already absent, acknowledge absence without sending a close to a replacement HWND.
+        try { await nativeCall('absent',this.nativeRequest(p),500); return 'window-absent'; }
+        catch { throw e; }
+      }
+    }
+    await this.cli(['-control','closeWallpaper','-location',p.windowName]);
+    if (p.native) { await nativeCall('absent',this.nativeRequest(p),this.config.timeoutMs); return 'window-absent'; }
+    return 'close-command-sent';
   }
   async close(id: string) {
     const p = this.get(id);
-    await this.cli(['-control','closeWallpaper','-location',p.windowName]);
+    const state = await this.closeWindow(p);
     p.cdp?.close(); this.previews.delete(id); await this.saveRegistry();
-    return { previewId: id, state: 'close-command-sent', windowName: p.windowName };
+    return { previewId: id, state, windowName: p.windowName };
   }
   async shutdown() {
     const failures: string[] = [];

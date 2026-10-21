@@ -1,6 +1,6 @@
 # Wallpaper Engine MCP
 
-Windows 本地 STDIO MCP 服务，用于制作可保存的 Wallpaper Engine 源工程，并通过官方引擎获取运行反馈。当前完成 Web 创作工作流的第一版；原生 Scene 作者能力尚未通过验收。
+Windows 本地 STDIO MCP 服务，用于制作可保存的 Wallpaper Engine 源工程，并通过官方引擎获取运行反馈。支持 Web 创作、CEF 和自有原生窗口截图；原生 Scene 作者能力尚未通过验收。
 
 ## 启动
 
@@ -37,10 +37,28 @@ node dist/index.js
 | `installDir` | 官方引擎安装目录，包含 wallpaper32.exe 或 wallpaper64.exe |
 | `workspace` | 受管工程、检查点、预览副本、截图和发布暂存目录；默认 `.we-mcp` |
 | `projectRoots` | 额外只读工程目录；可以是工程本身或其父目录；不扫描整盘 |
-| `devtoolsPort` | 手动配置的本机 CEF 调试端口；`null` 时只提供 CLI 和工程能力 |
+| `devtoolsPort` | 手动配置的本机 CEF 调试端口；`null` 时仍可使用 CLI、工程管理和已构建的原生截图后端 |
 | `timeoutMs` | 单次操作等待上限，1000–30000 毫秒 |
 
 本机集成测试要求在正常用户权限下访问引擎。受限沙箱可能使 CEF 无法写入自身配置目录，出现 `ProcessSingleton ... Error code: 5`；这是实际遇到的环境限制。
+
+### 可选原生窗口截图
+
+原生截图需要 Windows x64、.NET 10 x64 运行时；构建另需 .NET 10 SDK。本机验证使用 SDK 10.0.301、Windows 11 build 26100 和引擎 2.8.42。其他系统尚未实测。Windows SDK 投影版本固定为 10.0.19041.57。
+
+```powershell
+npm.cmd run build:native
+```
+
+脚本优先使用 `.we-mcp/tools/dotnet/dotnet.exe`，否则使用 PATH 中的 `dotnet`。首次恢复依赖需要访问官方 NuGet；缓存及构建产物均被 Git 忽略。构建后的 `native/WeCapture/bin/publish/` 是完整 helper 目录，部署时须连同 DLL、runtimeconfig 和许可证一起保留；无需在运行机器安装 SDK。服务不会自动下载或安装 SDK。
+
+helper 存在时，预览启动、调参、截图和关闭均增加窗口归属校验：启动前 HWND 基线、唯一生成的窗口名、同一会话、引擎可执行文件路径、PID、创建时间和窗口类。身份不符即拒绝，关闭后还须确认原 HWND 和名称消失；失败保留记录。未构建 helper 时继续使用原有 CLI/CEF 能力，但关闭只报告命令已发送。
+
+原生捕获不依赖 CEF，使用 Windows Graphics Capture，仅针对绑定窗口；没有桌面或显示器截图兜底。最小化、隐藏、尺寸变化、超时均有明确错误。采用每监视器 DPI 感知，返回实际物理像素尺寸及 DPI；原生图像包含标题栏和窗口边框，尺寸可大于请求的客户区尺寸。帧限制为 16777216 像素、单边 8192、PNG 20 MiB，图像内嵌总量限制为 8 MiB base64。
+
+颜色路径为 SDR BGRA8；HDR 色彩保真、多屏混合 DPI、4K 和长时间压力场景尚未验收。PNG 成功或连续帧不同都不能独立证明画面正确或美观。Scene 的运行时脚本/素材健康也不能由原生截图推导。
+
+复用说明：独立 helper 的 COM/D3D 互操作改编自 [Backdrop for Codex](https://github.com/TogawaSakiko-desuwa/backdrop-for-codex)，保留 Apache-2.0 许可证与 NOTICE；单帧流程另参考 [Win32CaptureSample](https://github.com/robmikh/Win32CaptureSample)。详见 [helper 归属声明](native/WeCapture/THIRD-PARTY-NOTICES.md)。没有引入两者的完整应用或替代官方播放器。
 
 ## 工具
 
@@ -55,7 +73,7 @@ node dist/index.js
 | `we_project_validate` | 检查 JSON、入口、HTML/CSS 本地引用和音频开关；不冒充真实引擎验证 |
 | `we_preview_open` | 从固定源码副本打开唯一命名窗口，返回就绪证据或未验证状态 |
 | `we_preview_set_properties` | 校验类型及范围后修改该预览的公开参数，不修改源码默认值 |
-| `we_preview_observe` | 返回 1–3 张 PNG 图像、文件路径、固定诊断对象及有界日志；可重开宿主进行复验 |
+| `we_preview_observe` | 采集 1–3 张 PNG；默认只返回文本诊断和文件路径；`includeImages:true` 才附带有界图像内容；`backend:auto/cef/native` 选择捕获路径 |
 | `we_preview_close` | 只关闭本服务创建的预览窗口，不发送全局 stop 或 kill |
 | `we_publish_prepare` | 复制运行工程到发布暂存目录并输出剩余步骤，不打包 `.pkg` 或上传 |
 
@@ -63,7 +81,7 @@ node dist/index.js
 
 1. 用 `we_project_create` 创建 `managed/my-wallpaper`。当前模板支持速度、密度、音频开关、星体颜色，运行文件无网络依赖。
 2. 用 `we_project_inspect` 获取 revision 与源码；调用 `we_project_apply` 时传入该 revision。`content: null` 表示删除，其他值是文件的完整新内容。
-3. 打开预览并调用 observe；模型可直接读取 MCP 图像内容，用户也可查看保留的原图。
+3. 打开预览并调用 observe；默认只返回文本和原图路径，适合无多模态模型的 CLI。多模态客户端可显式传 `includeImages:true`。`backend:auto` 优先使用已连接 CEF，否则选择原生后端；没有可用后端则返回错误。
 4. 临时调参后，把满意的值写入 `project.json` 的 `general.properties`，再打开新的预览。已有预览始终指向原来的固定源码副本。
 5. `we_preview_observe` 的 `reload: true` 会关闭并重开这个预览窗口，从同一源码副本重新初始化宿主。运行参数会恢复为该副本的源码默认值。
 6. 通过多帧检查后执行发布准备，检查预览图、动态资源、素材权利和元数据，再用官方编辑器导入、发布。
@@ -92,12 +110,14 @@ node scripts/verify-engine.mjs
 
 普通测试覆盖路径边界、链接、只读来源、检查点、并发版本冲突、Windows 参数、属性回调、限帧、CEF 超时/断线/日志及真实 STDIO 握手。集成脚本另验证实际画面、多帧变化、参数接收、源码 revision、宿主重载和发布准备，详细报告写入 `.we-mcp/integration-report.json`。
 
+构建原生 helper 后，运行 `node scripts/verify-native.mjs`，验证无 CEF 的原生截图、默认纯文本返回、显式图像块、多帧变化、重载、真实窗口消失，以及篡改身份、伪造同名窗口、最小化、窗口改名和查找超时的拒绝行为。报告位于 `.we-mcp/native-verification/report.json`。此脚本会短暂打开本轮创建的测试窗口，只操作这些窗口；必须在正常交互用户会话中运行。
+
 `.we-mcp` 和本机配置不会进入 Git。应单独备份受管源工程；工坊上传不能替代源工程备份。一个工作区只允许一个服务进程；崩溃留下 `server.lock` 时，先确认旧进程已退出，再移除这个空锁目录。`active-previews.json` 记录了预览窗口名称，便于异常退出后人工回收。
 
 多文件写入不具备跨进程原子性：服务会序列化调用、检查写入前后的哈希，并保存 checkpoint 和 operation journal。中途遇到错误返回 `RECOVERY_REQUIRED`，保留现场；重新 inspect 后可用检查点恢复。外部编辑器不应同时写同一受管工程。
 
 首版限制：工程上限 64 MiB / 2000 文件，单次文本读取 256 KiB，单文件文本修改 1 MiB。拒绝隐藏路径、node_modules、Windows 特殊文件名和符号链接/目录联接；因此应导入运行工程目录，而不是含开发依赖的仓库根目录。运行产生的历史副本和截图暂不自动清理。
 
-尚未完成原生窗口截图、Scene 模板验收、真实系统音频和媒体会话验收、UI 自动化及工坊上传。静态依赖检查不能穷尽任意 JavaScript/Scene 动态引用；发布准备仍需检查预览图和依赖。
+尚未完成 Scene 模板验收、真实系统音频和媒体会话验收、UI 自动化及工坊上传。原生捕获已验证 Web 独立窗口，不代表 Scene 作者工作流已验收。静态依赖检查不能穷尽任意 JavaScript/Scene 动态引用；发布准备仍需检查预览图和依赖。
 
 接口依据：[官方 CLI](https://help.wallpaperengine.io/en/functionality/cli.html)、[Web 属性](https://docs.wallpaperengine.io/en/web/customization/properties.html)、[音频](https://docs.wallpaperengine.io/en/web/audio/visualizer.html)、[调试入口](https://docs.wallpaperengine.io/en/web/debug/debug.html)、[官方 MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)。版本兼容结论以本仓库的本机实测记录为准。

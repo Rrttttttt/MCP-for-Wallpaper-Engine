@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:native": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1",
     "start": "node dist/index.js",
     "test": "npm run build && node --test test/*.test.mjs",
     "probe": "node dist/index.js --probe"
