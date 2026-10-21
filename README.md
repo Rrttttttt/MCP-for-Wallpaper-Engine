@@ -96,6 +96,10 @@ Scene 的 Origin 属性内联绑定 SceneScript，源码位于 `scene.json` 的 
 
 模板结构已由本机官方编辑器 2.8.42 打开、保存并回读，最终脚本保持不变；官方引擎独立窗口已实测图片、连续运动、幅度归零/恢复和速度归零。当前实现使用直接属性读取，是因为本机实测仅依赖 `applyUserProperties` 回调时参数未生效；没有把该观察外推为所有版本的回调行为。
 
+基础模板还已完成编辑、回滚与重开闭环验收：同时修改 `project.json` 的源码默认参数和 `scene.json` 的 Origin/脚本，实际画面从横向变为纵向运动；旧预览重载仍使用旧副本，源码回滚也不会改写运行中的新版副本。重新打开工程后，源码 revision、各源文件 SHA-256（包括 PNG/TEX）与原版一致，画面恢复横向运动。临时参数在同一副本重载后恢复源码默认值。检查的是原始源文件，渲染器在私有副本中新生成的 shader 缓存不属于该源码清单。
+
+验收另覆盖过期 revision 的编辑/恢复拒绝、同时带新旧两个活动预览退出 MCP 服务后的窗口/锁回收，以及重启 MCP 服务后从持久检查点恢复两个源码版本。这里重启的是 MCP 服务进程；未覆盖强制杀进程、Wallpaper Engine 本体重启或整机重启后的恢复。
+
 模板自带 TEX，创建和预览无需再次编译。修改源 PNG 或编译配置后，可重新生成模板纹理：
 
 ```powershell
@@ -132,7 +136,7 @@ node scripts/verify-engine.mjs
 
 构建原生 helper 后，运行 `node scripts/verify-native.mjs`，验证无 CEF 的原生截图、默认纯文本返回、显式图像块、多帧变化、重载、真实窗口消失，以及篡改身份、伪造同名窗口、最小化、窗口改名和查找超时的拒绝行为。报告位于 `.we-mcp/native-verification/report.json`。此脚本会短暂打开本轮创建的测试窗口，只操作这些窗口；必须在正常交互用户会话中运行。
 
-`node scripts/verify-scene.mjs` 通过真实 STDIO MCP 创建新 Scene 工程，以纯文本模式采集原生截图，测量图案的青色像素位置，验证实际运动、参数响应及窗口回收。报告位于 `.we-mcp/scene-verification/report.json`。检查图案位置而非仅比较整张 PNG，避免把标题栏变化当作动画；这仍不是通用画面质量评价或 Scene 错误收集。
+`node scripts/verify-scene.mjs` 通过真实 STDIO MCP 创建新 Scene 工程，以纯文本模式采集原生截图，测量图案的青色像素位置，验证实际运动、参数响应、编辑/回滚/重开、固定副本隔离及服务重启后的持久检查点。它会启动两个先后运行的 MCP 服务，测试正常退出时的窗口和锁回收；异常清理失败也会令脚本失败。报告位于 `.we-mcp/scene-verification/report.json`，包含调用、测量、文件哈希校验与服务进程记录。检查图案位置而非仅比较整张 PNG，避免把标题栏变化当作动画；这仍不是通用画面质量评价或 Scene 错误收集。
 
 `.we-mcp` 和本机配置不会进入 Git。应单独备份受管源工程；工坊上传不能替代源工程备份。一个工作区只允许一个服务进程；崩溃留下 `server.lock` 时，先确认旧进程已退出，再移除这个空锁目录。`active-previews.json` 记录了预览窗口名称，便于异常退出后人工回收。
 
@@ -140,7 +144,7 @@ node scripts/verify-engine.mjs
 
 首版限制：工程上限 64 MiB / 2000 文件，单次文本读取 256 KiB，单文件文本修改 1 MiB。拒绝隐藏路径、node_modules、Windows 特殊文件名和符号链接/目录联接；因此应导入运行工程目录，而不是含开发依赖的仓库根目录。运行产生的历史副本和截图暂不自动清理。
 
-尚未完成 Scene 编辑/回滚/重开全闭环验收、复杂 Scene 工具、真实系统音频和媒体会话验收、通用 UI 自动化及工坊上传。基础 Scene 模板通过不代表任意 Scene 作者工作流已验收。静态依赖检查不能穷尽任意 JavaScript/Scene 动态引用；发布准备仍需检查预览图和依赖。
+当前四步目标（复用调研、原生捕获、基础 Scene 模板、Scene 编辑/回滚/重开闭环）已完成本机验收。尚未完成复杂 Scene 工具、通用 Scene 脚本/素材错误收集、真实系统音频和媒体会话验收、通用 UI 自动化及工坊上传。基础 Scene 模板通过不代表任意 Scene 作者工作流已验收。静态依赖检查不能穷尽任意 JavaScript/Scene 动态引用；发布准备仍需检查预览图和依赖。
 
 接口依据：[官方 CLI](https://help.wallpaperengine.io/en/functionality/cli.html)、[Web 属性](https://docs.wallpaperengine.io/en/web/customization/properties.html)、[音频](https://docs.wallpaperengine.io/en/web/audio/visualizer.html)、[调试入口](https://docs.wallpaperengine.io/en/web/debug/debug.html)、[官方 MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)。版本兼容结论以本仓库的本机实测记录为准。
 
