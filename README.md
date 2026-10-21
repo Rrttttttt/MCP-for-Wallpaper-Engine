@@ -73,6 +73,7 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 | `we_project_validate` | 检查 JSON、入口、HTML/CSS 引用、音频开关及 Scene 本地图片层依赖；不冒充真实引擎验证 |
 | `we_preview_open` | 从固定源码副本打开唯一命名窗口，返回就绪证据或未验证状态 |
 | `we_preview_set_properties` | 校验类型及范围后修改该预览的公开参数，不修改源码默认值 |
+| `we_preview_move_mouse` | 向自有 Web CEF 预览派发鼠标移动；`x/y` 为 0～1 的归一化坐标，左上 `(0,0)`、右下 `(1,1)`；不移动系统光标 |
 | `we_preview_observe` | 采集 1–3 张 PNG；默认只返回文本诊断和文件路径；`includeImages:true` 才附带有界图像内容；`backend:auto/cef/native` 选择捕获路径 |
 | `we_preview_close` | 只关闭本服务创建的预览窗口，不发送全局 stop 或 kill |
 | `we_publish_prepare` | 复制运行工程到发布暂存目录并输出剩余步骤，不打包 `.pkg` 或上传 |
@@ -87,6 +88,10 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 6. 通过多帧检查后执行发布准备，检查预览图、动态资源、素材权利和元数据，再用官方编辑器导入、发布。
 
 版本冲突返回 `REVISION_CONFLICT`，应重新 inspect 后再修改。成功修改返回 `checkpointId`；无变化的调用返回 `checkpointId: null`。错误通过 MCP `isError` 和结构化错误代码返回。
+
+鼠标移动使用当前页面 `innerWidth/innerHeight`（每边 1～8192 CSS 像素）按 `x*(width-1)`、`y*(height-1)` 换算，不使用含标题栏的原生截图尺寸。仅支持配置 CEF 调试的 Web 预览，Scene 或无调试端口返回 `MOUSE_INPUT_UNSUPPORTED`；目标缺失、歧义或跳转会拒绝。不提供点击、滚轮、键盘或系统光标回退。输入前后校验页面归属，并沿用可用的原生窗口身份校验。
+
+返回 `confirmation: "event-dispatched"` 仅表示 CDP 命令已确认；`visualResponse: "unverified"` 提醒继续 observe 检查画面。检查和派发不是原子操作：期间跳转、调整大小或连接失败可能发生在事件已发出之后，此类错误带 `dispatchAttempted: true`，不保证事件未被接收。本机官方引擎 2.8.42 已通过中心和边角移动命令冒烟检查（`node scripts/verify-engine.mjs`）；页面接收事件、系统光标不移动以及双眼方向/幅度/边缘画面仍待独立验收。调研依据见 [鼠标输入研究](docs/mouse-input-research.md)。
 
 ## 基础 Scene 模板
 

@@ -87,6 +87,29 @@ export class Cdp {
     if (r.exceptionDetails || r.result?.type !== 'string') throw new Fault('CEF_DIAGNOSTICS','Unable to read fixed diagnostic object.');
     return JSON.parse(r.result.value);
   }
+  async moveMouse(directory: string, x: number, y: number) {
+    if (![x,y].every(n => Number.isFinite(n) && n >= 0 && n <= 1)) throw new Fault('INVALID_MOUSE_POSITION','Mouse x/y must be finite normalized coordinates in [0,1].');
+    const viewport = async () => {
+      const r = await this.call('Runtime.evaluate',{ expression:'JSON.stringify({url:location.href,readyState:document.readyState,width:innerWidth,height:innerHeight})',returnByValue:true });
+      if (r.exceptionDetails || r.result?.type !== 'string') throw new Fault('CEF_VIEWPORT','Unable to read the current page viewport.');
+      const v = JSON.parse(r.result.value);
+      if (!v || typeof v !== 'object') throw new Fault('CEF_VIEWPORT','Invalid page viewport response.');
+      if (!matchesProject(v.url,directory)) throw new Fault('TARGET_CHANGED','CEF page is outside the owned preview.');
+      if (v.readyState !== 'complete' || ![v.width,v.height].every(n => Number.isInteger(n) && n > 0 && n <= 8192)) throw new Fault('CEF_VIEWPORT','Requires a ready page with viewport dimensions of 1–8192 CSS pixels.');
+      return { url:v.url as string,width:v.width as number,height:v.height as number };
+    };
+    const before = await viewport(), position = { x:x*(before.width-1),y:y*(before.height-1) };
+    // CDP checks and dispatch are separate commands; navigation cannot be made atomic here.
+    // After an attempted dispatch, failures must not imply that the page received no input.
+    try {
+      await this.call('Input.dispatchMouseEvent',{type:'mouseMoved',...position,button:'none',buttons:0,modifiers:0});
+      const after = await viewport();
+      if (after.url !== before.url || after.width !== before.width || after.height !== before.height) throw new Fault('TARGET_CHANGED','Page navigated or resized during mouse input.');
+    } catch(e) {
+      throw new Fault(e instanceof Fault ? e.code : 'MOUSE_INPUT_FAILED',(e as Error).message,{dispatchAttempted:true,visualResponse:'unverified'});
+    }
+    return { position,viewport:before,dispatchAttempted:true,confirmation:'event-dispatched',visualResponse:'unverified' };
+  }
   logs(after = 0) { return { entries: this.entries.filter(e => e.cursor > after), cursor: this.cursor, truncated: !!this.entries.length && after < this.entries[0]!.cursor - 1 }; }
   close() { this.socket.close(); this.rejectAll('Preview connection closed.'); }
 }

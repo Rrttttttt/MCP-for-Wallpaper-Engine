@@ -4,6 +4,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
 const root = fileURLToPath(new URL('../',import.meta.url));
 const client = new Client({name:'official-engine-verification',version:'1'});
 const transport = new StdioClientTransport({command:process.execPath,args:[path.join(root,'dist/index.js')],stderr:'inherit'});
@@ -26,6 +27,12 @@ try {
   else project = await call('we_project_create',{name:'stage0-starfield',title:'Audio Starfield — integration sample'});
   await call('we_project_validate',{projectId:project.projectId});
   let preview = await call('we_preview_open',{projectId:project.projectId,width:1280,height:720}); active.add(preview.previewId);
+  // Protocol smoke only: this template has no eye-follow interaction to visually accept.
+  for(const [x,y] of [[0.5,0.5],[1,0]]) {
+    const moved=await call('we_preview_move_mouse',{previewId:preview.previewId,x,y});
+    assert.equal(moved.confirmation,'event-dispatched'); assert.equal(moved.visualResponse,'unverified');
+    assert.deepEqual(moved.position,{x:x*(moved.viewport.width-1),y:y*(moved.viewport.height-1)});
+  }
   await call('we_preview_set_properties',{previewId:preview.previewId,properties:{speed:0.7,density:240}});
   const firstObservation = await call('we_preview_observe',{previewId:preview.previewId,count:3,intervalMs:600});
   if (firstObservation.images.length !== 3 || firstObservation.evidence?.diagnostics?.settings?.speed !== 0.7 || firstObservation.evidence?.diagnostics?.settings?.density !== 240) throw new Error('Live properties or multi-frame capture did not verify.');

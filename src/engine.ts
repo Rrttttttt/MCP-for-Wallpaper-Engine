@@ -64,13 +64,14 @@ export class Engine {
     return p;
   }
   private async bind(p: Preview) {
-    if (!this.config.devtoolsPort) return;
+    if (!this.config.devtoolsPort) return false;
     const target = await findTarget(this.config.devtoolsPort, p.directory);
-    if (!target) return;
+    if (!target) return false;
     if (p.cdp?.target.id !== target.id) {
       p.cdp?.close(); p.cdp = await Cdp.connect(this.config.devtoolsPort,target,Math.min(this.config.timeoutMs,4000));
       p.capabilities = await p.cdp.probe();
     }
+    return true;
   }
   private async waitReady(p: Preview) {
     let lastError: string | undefined;
@@ -133,6 +134,16 @@ export class Engine {
     await this.verifyWindow(p);
     await this.cli(propertyArgs(p.windowName,properties));
     return { previewId: id, submitted: properties, confirmation: 'command-sent-unverified', sourceDefaultsChanged: false, nextStep: 'Observe template diagnostics and the actual image.' };
+  }
+  async moveMouse(id: string, x: number, y: number) {
+    const p = this.get(id);
+    if (manifest(p.files).type !== 'web' || !this.config.devtoolsPort) throw new Fault('MOUSE_INPUT_UNSUPPORTED','Mouse movement requires a Web preview and configured CEF debugging. No system cursor fallback is used.');
+    await this.verifyWindow(p);
+    if (!await this.bind(p) || !p.cdp) throw new Fault('CEF_TARGET_UNAVAILABLE','No matching owned CEF page is available for mouse input.');
+    const result = await p.cdp.moveMouse(p.directory,x,y);
+    try { await this.verifyWindow(p); }
+    catch(e) { throw new Fault(e instanceof Fault ? e.code : 'WINDOW_VERIFICATION_FAILED',(e as Error).message,{...result,dispatchAttempted:true}); }
+    return { previewId:id,backend:'cef',normalized:{x,y},...result,nextStep:'Observe the rendered response; command acknowledgement does not verify eye direction, displacement or edge quality.' };
   }
   async observe(id: string, count = 1, intervalMs = 250, afterCursor = 0, reload = false, backend: 'auto' | 'cef' | 'native' = 'auto', includeImages = false) {
     const p = this.get(id), images: { path: string; data: string }[] = [], issues: string[] = [];

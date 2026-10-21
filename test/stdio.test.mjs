@@ -7,7 +7,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { fileURLToPath } from 'node:url';
 
-test('real stdio handshake, 12 tools, project create/apply/error and clean shutdown',async t => {
+test('real stdio handshake, 13 tools, project create/apply/error and clean shutdown',async t => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(),'we-mcp-stdio-'));
   const configFile = path.join(workspace,'config.json');
   await fs.writeFile(configFile,JSON.stringify({workspace:path.join(workspace,'data')}));
@@ -15,7 +15,13 @@ test('real stdio handshake, 12 tools, project create/apply/error and clean shutd
   const client = new Client({name:'smoke-test',version:'1'});
   t.after(async()=>{await client.close();await fs.rm(workspace,{recursive:true,force:true})});
   await client.connect(transport);
-  const tools = await client.listTools(); assert.equal(tools.tools.length,12);
+  const tools = await client.listTools(); assert.equal(tools.tools.length,13);
+  assert.ok(tools.tools.some(tool=>tool.name==='we_preview_move_mouse'));
+  const unknownPreview='11111111-1111-4111-8111-111111111111';
+  const mouse=await client.callTool({name:'we_preview_move_mouse',arguments:{previewId:unknownPreview,x:0.5,y:0.5}});
+  assert.equal(mouse.isError,true); assert.equal(mouse.structuredContent.error.code,'PREVIEW_NOT_FOUND');
+  const invalidMouse=await client.callTool({name:'we_preview_move_mouse',arguments:{previewId:unknownPreview,x:1.1,y:0.5}});
+  assert.equal(invalidMouse.isError,true);
   const created = await client.callTool({name:'we_project_create',arguments:{name:'test',title:'STDIO Test'}});
   assert.equal(created.isError,undefined);
   const project = created.structuredContent;
