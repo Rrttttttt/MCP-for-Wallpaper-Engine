@@ -68,7 +68,7 @@ export class Engine {
     if (!this.config.devtoolsPort) return false;
     const target = await findTarget(this.config.devtoolsPort, p.directory);
     if (!target) return false;
-    if (p.cdp?.target.id !== target.id) {
+    if (p.cdp?.target.id !== target.id || p.cdp?.target.discoveryHost !== target.discoveryHost) {
       p.cdp?.close(); p.cdp = await Cdp.connect(this.config.devtoolsPort,target,Math.min(this.config.timeoutMs,4000));
       p.capabilities = await p.cdp.probe();
     }

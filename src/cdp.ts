@@ -2,9 +2,15 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { Fault } from './files.js';
 
-export interface Target { id: string; type: string; url: string; webSocketDebuggerUrl?: string }
-export async function endpoint(port: number, route: string): Promise<any> {
-  const response = await fetch(`http://127.0.0.1:${port}${route}`, { signal: AbortSignal.timeout(2000), redirect: 'error' });
+const loopbacks = ['127.0.0.1','[::1]'] as const;
+type Loopback = typeof loopbacks[number];
+export interface Target { id: string; type: string; url: string; webSocketDebuggerUrl?: string; discoveryHost?: Loopback }
+export async function endpoint(port: number, route: string, host?: Loopback): Promise<any> {
+  if (!host) {
+    try { return await endpoint(port,route,'127.0.0.1'); }
+    catch { return endpoint(port,route,'[::1]'); }
+  }
+  const response = await fetch(`http://${host}:${port}${route}`, { signal: AbortSignal.timeout(2000), redirect: 'error' });
   if (!response.ok) throw new Fault('CEF_UNAVAILABLE', `CEF returned HTTP ${response.status}.`);
   const body = await response.text();
   if (body.length > 2 * 1024 * 1024) throw new Fault('CEF_RESPONSE_LIMIT','CEF discovery response too large.');
@@ -19,9 +25,16 @@ export function matchesProject(url: string, directory: string) {
   } catch { return false; }
 }
 export async function findTarget(port: number, directory: string): Promise<Target | undefined> {
-  const targets: Target[] = await endpoint(port, '/json/list');
-  if (!Array.isArray(targets)) throw new Fault('CEF_PROTOCOL', 'CEF target list is not an array.');
-  const matches = targets.filter(t => t.type === 'page' && matchesProject(t.url, directory));
+  // WE desktop and preview renderers can listen on different loopback families at the same port.
+  const discovered = await Promise.allSettled(loopbacks.map(async host => {
+    const targets: Target[] = await endpoint(port, '/json/list',host);
+    if (!Array.isArray(targets) || targets.some(t => !t || typeof t.id !== 'string' || typeof t.type !== 'string' || typeof t.url !== 'string')) throw new Fault('CEF_PROTOCOL', 'Invalid CEF target list.');
+    return targets.filter(t => t.type === 'page' && matchesProject(t.url,directory)).map(t => ({...t,discoveryHost:host}));
+  }));
+  for (const result of discovered) if (result.status === 'rejected' && (result.reason instanceof SyntaxError || result.reason instanceof Fault && ['CEF_PROTOCOL','CEF_RESPONSE_LIMIT'].includes(result.reason.code))) throw result.reason;
+  const available = discovered.filter(result => result.status === 'fulfilled');
+  if (!available.length) throw (discovered[0] as PromiseRejectedResult).reason;
+  const matches = available.flatMap(result => result.value);
   if (matches.length > 1) throw new Fault('AMBIGUOUS_TARGET','Multiple CEF pages match the preview; refusing to choose one.');
   return matches[0];
 }
@@ -55,8 +68,9 @@ export class Cdp {
     if (!target.webSocketDebuggerUrl) throw new Fault('CEF_PROTOCOL','Target has no WebSocket URL.');
     const url = new URL(target.webSocketDebuggerUrl);
     if (url.protocol !== 'ws:' || !['127.0.0.1','localhost','[::1]'].includes(url.hostname) || Number(url.port) !== port || url.username || url.password) throw new Fault('UNSAFE_CEF_ENDPOINT','Only configured loopback WebSocket endpoints are accepted.');
-    // Pin even a "localhost" advertisement to the configured IPv4 loopback.
-    url.hostname = '127.0.0.1';
+    if (target.discoveryHost && !loopbacks.includes(target.discoveryHost)) throw new Fault('UNSAFE_CEF_ENDPOINT','Invalid discovery address.');
+    // Pin to the listener that supplied this target, never resolve "localhost" to a different renderer.
+    url.hostname = target.discoveryHost ?? (url.hostname === 'localhost' ? '127.0.0.1' : url.hostname);
     const socket = new WebSocket(url);
     await new Promise<void>((resolve,reject) => {
       const timer = setTimeout(() => { socket.close(); reject(new Fault('CEF_TIMEOUT','CEF WebSocket connection timed out.')); }, timeout);

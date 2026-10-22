@@ -10,7 +10,7 @@ function fixture(t) {
   const previous={fetch:globalThis.fetch,WebSocket:globalThis.WebSocket};
   const pages=new Map(),sent=[];
   let targets;
-  globalThis.fetch=async()=>new Response(JSON.stringify(targets??[...pages.values()].map(p=>p.target)));
+  globalThis.fetch=async address=>new Response(JSON.stringify(new URL(address).hostname==='[::1]'?[]:targets??[...pages.values()].map(p=>p.target)));
   class Socket extends EventTarget {
     constructor(url) { super(); this.page=pages.get(new URL(url).pathname.split('/').at(-1)); queueMicrotask(()=>this.dispatchEvent(new Event('open'))); }
     close() { this.dispatchEvent(new Event('close')); }

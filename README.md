@@ -167,7 +167,7 @@ Scene 静态检查返回 `sceneDependencies`，遍历本地 `image → model.mat
 --remote-debugging-port=9223 --remote-debugging-address=127.0.0.1
 ```
 
-服务本身不会改这些设置。`we.config.json` 的 `devtoolsPort` 必须与引擎实际端口一致。本机已确认监听地址为 `127.0.0.1`，未把此结果推断为其他版本保证。
+服务本身不会改这些设置。`we.config.json` 的 `devtoolsPort` 必须与引擎实际端口一致。本机发现桌面 Web 与独立预览可分别监听同端口的 `127.0.0.1` 和 `[::1]`，即使配置中写了 IPv4 地址。服务查询两个回环地址，按自有工程路径选取唯一目标，并将 WebSocket 固定到发现它的地址；多个匹配目标仍拒绝连接。详见 [CEF 双地址修复与验收](docs/cef-loopback-acceptance.md)。
 
 直接使用 `Page.reload` 在本机丢失了宿主属性和 FPS 回调，因此实现改为重建自有预览窗口。CLI 的 `RAW~(...)~END` JSON 需要保留 Windows 原始引号；实现仅对固定的属性命令使用原始参数模式，并拒绝保留分隔符，全程不经过 shell。
 
@@ -177,7 +177,10 @@ Scene 静态检查返回 `sceneDependencies`，遍历本地 `image → model.mat
 npm.cmd test
 # 下面会实际打开并回收独立预览；先配置安装目录和 CEF 端口
 node scripts/verify-engine.mjs
+node scripts/verify-cef.mjs
 ```
+
+`verify-cef.mjs` 在隔离工作区验证 CEF 截图、实际鼠标事件、属性回读、控制台/运行异常收集和宿主重载；可传入现有 Web 工程目录以测试副本，并比较原工程前后哈希。该脚本要求工程提供本项目的 `__weDiagnostics` 和 `speed` 属性，不是任意第三方工程的通用验收器。报告保存在 `.we-mcp/cef-verification/<运行ID>/report.json`。它会在测试页注入固定错误验证收集，重载后应清空；不会写入原工程或提供公开任意执行接口。
 
 普通测试覆盖路径边界、链接、只读来源、检查点、并发版本冲突、Windows 参数、属性回调、限帧、CEF 超时/断线/日志及真实 STDIO 握手。集成脚本另验证实际画面、多帧变化、参数接收、源码 revision、宿主重载和发布准备，详细报告写入 `.we-mcp/integration-report.json`。
 
