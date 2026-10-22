@@ -204,6 +204,11 @@ export class Engine {
   }
   private async closeWindow(p: Preview) {
     if (p.native) {
+      if (!p.identity) {
+        // A failed launch may never create a window. Do not wait for it to appear during cleanup.
+        try { await nativeCall('absent',this.nativeRequest(p),500); return 'window-absent'; }
+        catch(e) { if (!(e instanceof Fault) || e.code !== 'WINDOW_CLOSE_TIMEOUT') throw e; }
+      }
       try { await this.verifyWindow(p); }
       catch(e) {
         // If already absent, acknowledge absence without sending a close to a replacement HWND.

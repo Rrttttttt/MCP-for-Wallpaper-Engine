@@ -269,3 +269,66 @@ git diff --check
 报告回退基线为 `c22e3dc`，本次提交只更改本文。运行现场的旧锁保留在上述归档，不应为回退文档而恢复阻塞；若确需还原事故现场，必须先结束所有相关会话，确认没有当前持有者或新锁，再单独审核目录身份和归档审计，不可覆盖当前 server.lock。
 
 原工作区阻塞已解除。未验证或未完成的部分：失败预览下客户端与服务的退出期限、原保存报告卡住的历史根因、恢复各阶段崩溃、真实 ACL/PID 复用，以及恶意外部目录替换。下一独立任务是构造失败预览退出的回归，定位并修复能否正常释放锁；本次不混入该代码改动。
+
+## 失败预览退出超时的修复
+
+2026-10-22，基线 `5ffd222`。本次只处理“已登记但尚未绑定身份、实际不存在的预览导致退出遗留锁”这一可复现分支。原保存报告卡住的完整历史原因仍不能据此认定。
+
+### 实现分析、来源与范围
+
+调用关系：`src/index.ts` 收到 stdin EOF → 等待串行工具队列 → `Engine.shutdown()` → `close()` → `closeWindow()` → 清理预览注册表 → `Projects.unlock()`。`src/native.ts` 启动有期限的原生助手；`native/WeCapture/Program.cs` 的 find 等待窗口出现，absent 则确认名称及已知原 HWND 均不存在。原实现先 verifyWindow；无身份时它先 find，超时后才检查 absent。
+
+修复前搜索了官方实现和 GitHub 社区讨论，比较如下（Star 为 2026-10-22 查询快照，SDK 页面为约数）：
+
+| 开源项目 | 功能、维护与文档 | Star / 技术栈 | 许可证与复用判断 |
+| --- | --- | --- | --- |
+| [modelcontextprotocol/typescript-sdk](https://github.com/modelcontextprotocol/typescript-sdk) | 官方服务端/客户端及 STDIO 生命周期；提供当前文档、测试和持续维护记录。 | 约 13.6k / TypeScript | [许可证](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/LICENSE)正由 MIT 过渡到 Apache-2.0，历史贡献按相应许可保留；本项目已依赖 2.3.1，直接复用客户端关闭流程和真实握手，不拷贝 SDK 实现。 |
+| [modelcontextprotocol/servers](https://github.com/modelcontextprotocol/servers) | 官方参考服务集合；查询时最近推送为 2026-10-19，有各服务文档，但不负责本项目的窗口生命周期。 | 91,445 / GitHub 主语言 TypeScript | [许可证](https://github.com/modelcontextprotocol/servers/blob/main/LICENSE)同处许可过渡；可参考服务组织方式，无法直接代替窗口归属检查，不引入整套服务。 |
+
+社区 [issue #579](https://github.com/modelcontextprotocol/typescript-sdk/issues/579) 和 [issue #532](https://github.com/modelcontextprotocol/typescript-sdk/issues/532) 讨论 STDIO 关闭顺序和异步清理。它们是历史问题线索，不能替代当前版本验证。[官方 STDIO 文档](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/serving/stdio.md)说明 EOF 会关闭 transport，但应用持有的资源仍需自行清理。本地安装的客户端 `dist/stdio.mjs` 经读取确认：先关闭 stdin，等待 2 秒，再发 SIGTERM，之后仍可能 SIGKILL；Windows 上这可能直接终止子进程。
+
+因此继续基于现有项目修复公共 closeWindow，不增加依赖、客户端私有等待参数或全局强制清理。主要风险是把检查失败误当作不存在，或为了缩短退出时间绕过窗口身份；本次均用拒绝路径验证。
+
+### 复现、假设与对照
+
+本机忽略目录中的 `.we-mcp/reproduce-shutdown.mjs` 使用真实 SDK/MCP、真实原生窗口助手和独立 UUID 工作区，仅在测试子进程中拦截 Engine.cli，使启动在登记后失败，不发送任何真实引擎命令。默认调用 client.close，然后检查旧锁、注册表和下一会话。最初在受限环境中窗口枚举失败，故改用当前用户桌面会话运行；这次权限失败发生在登记之前，不算退出缺陷复现。
+
+修复前同一命令两次均失败：client.close 约 2.02 秒返回，锁及一条预览记录留下，新会话 mode: diagnostic、startupIssue: WORKSPACE_LOCKED，原 owner 为 exited。证据位于 `.we-mcp/shutdown-repro/384863e3-0c4a-41bf-a267-37fce5e63f34/report.json` 和 `9104bbb7-8e40-4245-afc0-dee03f2294c8/report.json`。
+
+在产品修改前排列三个可证伪假设：①缺失窗口的重复发现超过客户端关闭期限；②EOF/信号相互打断；③持久文件写入慢。逐项对照：
+
+- 只用原始 stdin EOF、让服务自行退出，耗时 3443 ms，其中 verifyWindow 的 find 占 3161 ms；之后 absent、注册表和锁均正常清理。尚未进入发送 closeWallpaper 的路径。
+- 仅在测试中跳过原生清理分支，关闭约 14 ms 且锁释放；由于 CLI 始终注入失败，该对照仍保留预览记录，不能称为完整清理成功。
+- 两项结果把耗时定位到无身份预览的 find，不支持慢文件写入或 EOF 自身必然无法清理。原始 EOF 对照记录在 `945a7185-a8bc-44a7-b0b9-fb7a02f1609b/report.json`；跳过分支对照记录在 `bc478897-eae5-406d-9264-164c17ec5ccf/report.json`。临时调试包装已移除。
+
+### 修改与验证
+
+| 文件 | 改动与原因 |
+| --- | --- |
+| `src/engine.ts` | closeWindow 增加 5 行：仅对 native 且无 identity 的预览，先调用 500 ms absent；成功即返回 window-absent。只有 WINDOW_CLOSE_TIMEOUT 才继续原有 find/verify/close 流程，其他检查错误直接返回，保留记录。 |
+| `test/shutdown.test.mjs` | 用真实 SDK、服务入口及独立工作区验证正常 client.close 后锁和注册表清理、新会话取得所有权；另验证延迟窗口的身份约束、非本会话窗口和检查错误。 |
+| `test/fixtures/shutdown-preload.mjs`、`shutdown-native.mjs` | 仅在测试子进程注册 Node 模块加载 hook，模拟原生窗口边界及 CLI 失败；产品代码不含注入参数。启动、队列、持久登记、关闭和锁释放仍执行真实代码。 |
+| `README.md`、本文 | 说明行为、可复现原因和退出保证的范围。 |
+
+先运行 `node --test test/shutdown.test.mjs`，修复前缺失窗口用例因锁仍存在失败；其他新增用例也捕获未先检查 absence 及错误被再次发现覆盖。随后加入产品修复，针对性检查全部通过。
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm.cmd run build`、`node --test test/shutdown.test.mjs` | 构建成功，5/5（包含子测试）通过。 |
+| `npm.cmd test` | 构建成功，全套 30/30 通过，无跳过。 |
+| `node .we-mcp/reproduce-shutdown.mjs`，真实 Windows helper | 原命令由失败变为成功；关闭约 280 ms，注册表 []、旧锁不存在、新会话 mode: owner。报告 `.we-mcp/shutdown-repro/9f26b57a-328b-4e52-bdb5-02c08a7cd93f/report.json`，error:null。 |
+| `node scripts/verify-scene.mjs`，真实官方引擎 | 完整 Scene 编辑/回滚/重开、两个已绑定活动预览随 EOF 关闭、锁释放、服务重启均通过。报告 `.we-mcp/scene-verification/report.json`，error:null、cleanupErrors:[]。 |
+
+模拟测试不要求本机安装引擎或构建原生 helper，但不能替代实机窗口检查；上述两项本机验收分别验证真实 absent 与真实活动窗口清理。此次没有操作原用户工程或其锁归档，也没有改变桌面壁纸和引擎配置。
+
+### 本次审查与剩余边界
+
+1. **为何选择**：根因是清理时先等待本应不再出现的窗口，修复放在 close、shutdown、reload 共用的 closeWindow，避免在多个客户端加延迟补丁。
+2. **更简单的实现**：直接删除注册表或提前释放锁会丢失状态；增加客户端等待只对特定宿主有效。复用现有 absent 检查即可，正常已绑定预览不多加等待。
+3. **架构和隐藏约束**：仍存在的无身份窗口继续按启动基线绑定、验证后才能关闭；非本会话和无法检查的窗口不发送关闭命令。无 helper 的 CLI 路径和锁恢复政策未改。
+4. **绕路与技术债**：无产品硬编码 PID、测试开关、吞掉所有错误或强制删锁。500 ms 沿用现有 fallback 的 absence 检查期限；测试替换只在 test/fixtures 的独立子进程生效。修复前失败与权限限制均明确记录。
+5. **十倍规模首要限制**：清理仍串行，多个真实窗口、慢系统调用或正在执行的工具可能超过宿主退出期限。本次不把针对缺失窗口的修复夸大为通用退出协议；若需该保证，应另行设计可取消操作或显式排空流程，并独立验收。
+
+未验收：窗口在确认不存在后才被延迟 CLI 创建、helper 挂起或系统负载使其超过客户端期限、关闭时仍有长工具执行、断电/强杀和各恢复阶段崩溃、真实 ACL/PID 复用。检查错误仍保留记录；进程确实被强杀时，仍可能需要既有受控锁恢复。原保存报告卡住的完整历史原因未确认。
+
+本次回滚基线 `5ffd222`。回滚前应正常结束相关服务并确认锁释放；撤销本次提交后重新构建。下一独立步骤为恢复各阶段的崩溃验收，不在本次继续修改。
