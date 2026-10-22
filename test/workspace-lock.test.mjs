@@ -4,7 +4,8 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { promisify } from 'node:util';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
@@ -15,11 +16,15 @@ async function fixture(t) {
   const workspace = path.join(directory,'data'), config = path.join(directory,'config.json');
   await fs.writeFile(config,JSON.stringify({workspace}));
   const clients=[];
-  t.after(async()=>{for (const client of clients.reverse()) await client.close();await fs.rm(directory,{recursive:true,force:true})});
-  return {directory,workspace,config,lock:path.join(workspace,'server.lock'),connect:()=>connect(config,clients)};
+  t.after(async()=>{
+    for (const client of clients.reverse()) await client.close();
+    assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir())+path.sep+'we-mcp-lock-'));
+    await fs.rm(directory,{recursive:true,force:true});
+  });
+  return {directory,workspace,config,lock:path.join(workspace,'server.lock'),connect:env=>connect(config,clients,env)};
 }
-async function connect(config,clients) {
-  const transport = new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/index.js',import.meta.url)),'--config',config],stderr:'pipe'});
+async function connect(config,clients,env) {
+  const transport = new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/index.js',import.meta.url)),'--config',config],stderr:'pipe',env});
   const client = new Client({name:'workspace-lock-test',version:'1'});
   transport.stderr?.resume();
   clients.push(client);
@@ -38,15 +43,18 @@ test('legacy empty lock remains reachable through MCP without changing the works
   const before=await fs.stat(lock);
   const {client}=await connect();
   const tools=(await client.listTools()).tools;
-  assert.equal(tools.length,14);
+  assert.equal(tools.length,15);
   assert.equal(tools.find(tool=>tool.name==='we_workspace_diagnose').annotations.readOnlyHint,true);
   const report=await diagnose(client);
   assert.equal(report.mode,'diagnostic');
+  assert.equal(report.startupIssue.code,'WORKSPACE_LOCKED');
   assert.equal(report.lock.state,'present');
   assert.equal(report.lock.owner,null);
   assert.equal(report.holder.state,'unknown');
   assert.equal(report.recovery.available,false);
   assert.match(report.lock.fingerprint,/^[a-f0-9]{64}$/);
+  const refused=await client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:report.lock.fingerprint,confirm:true}});
+  assert.equal(refused.structuredContent.error.code,'WORKSPACE_RECOVERY_REFUSED');
   const previewId='11111111-1111-4111-8111-111111111111',projectId='managed/blocked';
   const blockedTools=[
     ['we_project_list',{}],['we_project_create',{name:'blocked',title:'Blocked'}],
@@ -58,7 +66,7 @@ test('legacy empty lock remains reachable through MCP without changing the works
     ['we_preview_move_mouse',{previewId,x:0.5,y:0.5}],['we_preview_observe',{previewId}],
     ['we_publish_prepare',{projectId,intent:'new'}]
   ];
-  assert.deepEqual(new Set(blockedTools.map(([name])=>name)),new Set(tools.filter(tool=>tool.name!=='we_workspace_diagnose').map(tool=>tool.name)));
+  assert.deepEqual(new Set(blockedTools.map(([name])=>name)),new Set(tools.filter(tool=>!['we_workspace_diagnose','we_workspace_recover'].includes(tool.name)).map(tool=>tool.name)));
   for (const [name,args] of blockedTools) {
     const result=await client.callTool({name,arguments:args});
     assert.equal(result.isError,true);assert.equal(result.structuredContent.error.code,'WORKSPACE_LOCKED');
@@ -84,6 +92,9 @@ test('a second real MCP session identifies the owner and cannot unlock or take o
   const blocked=await diagnose(second.client);
   assert.equal(blocked.mode,'diagnostic');assert.equal(blocked.lock.fingerprint,owned.lock.fingerprint);
   if (process.platform==='win32') assert.equal(blocked.holder.state,'alive');
+  const refused=await second.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:blocked.lock.fingerprint,confirm:true}});
+  assert.equal(refused.structuredContent.error.code,'WORKSPACE_RECOVERY_REFUSED');
+  await assert.rejects(fs.access(path.join(workspace,'lock-recoveries')),{code:'ENOENT'});
   // Simulate only the OS query denial in an isolated child, without altering the service/runtime environment.
   const queryDenied=`
     import {createRequire,syncBuiltinESMExports} from 'node:module';
@@ -170,7 +181,142 @@ test('a crashed owned test server is diagnosable but never automatically reclaim
   const after=await diagnose(second.client);
   assert.equal(after.mode,'diagnostic');assert.equal(after.lock.fingerprint,original.lock.fingerprint);
   if (process.platform==='win32') assert.equal(after.holder.state,'exited');
-  assert.equal(after.recovery.available,false);
+  assert.equal(after.recovery.available,process.platform==='win32');
   await second.client.close();
   assert.equal(await fs.readFile(path.join(lock,'owner.json'),'utf8'),raw);
+});
+
+test('explicit MCP recovery archives a crashed owner and grants one new owner', {skip:process.platform!=='win32'},async t=>{
+  const {workspace,lock,connect}=await fixture(t);
+  const first=await connect();
+  const original=await diagnose(first.client);
+  const created=await first.client.callTool({name:'we_project_create',arguments:{name:'saved-source',title:'Saved source'}});
+  assert.equal(created.isError,undefined);
+  const previousRegistry=Buffer.from('[{"previewId":"historical-evidence-only"}]');
+  await fs.writeFile(path.join(workspace,'active-previews.json'),previousRegistry);
+  const before=await fs.readFile(path.join(lock,'owner.json'));
+  const next=await connect();
+  process.kill(first.transport.pid,'SIGKILL');await first.client.close();
+  const evidence=await diagnose(next.client);
+  assert.equal(evidence.holder.state,'exited');
+  assert.equal(evidence.recovery.available,true);
+  const noConfirmation=await next.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:original.lock.fingerprint,confirm:false}});
+  assert.equal(noConfirmation.isError,true);
+  const changed=await next.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:'0'.repeat(64),confirm:true}});
+  assert.equal(changed.structuredContent.error.code,'WORKSPACE_LOCK_CHANGED');
+  await assert.rejects(fs.access(path.join(workspace,'lock-recoveries')),{code:'ENOENT'});
+  const guard=await holdCoordination(t,workspace);
+  try {
+    const busy=await next.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:original.lock.fingerprint,confirm:true}});
+    assert.equal(busy.structuredContent.error.code,'WORKSPACE_COORDINATION_BUSY');
+    assert.deepEqual(await fs.readFile(path.join(lock,'owner.json')),before);
+  } finally { await guard.stop(); }
+  const recovered=await next.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:original.lock.fingerprint,confirm:true}});
+  assert.equal(recovered.isError,undefined);
+  assert.equal(recovered.structuredContent.state,'recovered');
+  assert.equal((await diagnose(next.client)).mode,'owner');
+  const archive=recovered.structuredContent.archive;
+  assert.deepEqual(await fs.readFile(path.join(archive,'server.lock','owner.json')),before);
+  assert.deepEqual(await fs.readFile(path.join(archive,'active-previews.json')),previousRegistry);
+  assert.deepEqual(await fs.readFile(path.join(workspace,'active-previews.json')),previousRegistry);
+  assert.equal(JSON.parse(await fs.readFile(path.join(archive,'record.json'))).state,'acquired');
+  const inspected=await next.client.callTool({name:'we_project_inspect',arguments:{projectId:created.structuredContent.projectId}});
+  assert.equal(inspected.structuredContent.revision,created.structuredContent.revision);
+  assert.equal((await diagnose(next.client)).startupIssue,null);
+  await next.client.close();await assert.rejects(fs.access(lock),{code:'ENOENT'});
+});
+
+async function holdCoordination(t,workspace) {
+  const script=`
+    const {WorkspaceLock}=await import(${JSON.stringify(new URL('../dist/workspace.js',import.meta.url).href)});
+    await new WorkspaceLock(process.argv[1]).coordinate(async()=>{
+      process.send({holding:true});
+      process.stdin.resume();await new Promise(resolve=>process.stdin.once('end',resolve));
+    });
+    process.disconnect();
+  `;
+  const child=spawn(process.execPath,['--input-type=module','-e',script,workspace],{stdio:['pipe','ignore','inherit','ipc'],windowsHide:true});
+  async function stop() {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const exit=once(child,'exit');child.kill('SIGKILL');await exit;
+  }
+  t.after(stop);
+  assert.deepEqual((await once(child,'message',{signal:AbortSignal.timeout(5000)}))[0],{holding:true});
+  return {stop};
+}
+
+test('acquisition and release share the cross-process guard, which dies with its owner',{skip:process.platform!=='win32'},async t=>{
+  const {workspace,lock}=await fixture(t);
+  const config={workspace,projectRoots:[],timeoutMs:1000};
+  const owner=new Projects(config);await owner.init();
+  const before=await fs.readFile(path.join(lock,'owner.json'));
+  const guard=await holdCoordination(t,workspace);
+  try {
+    await assert.rejects(new Projects(config).init(),{code:'WORKSPACE_COORDINATION_BUSY'});
+    await assert.rejects(owner.unlock(),{code:'WORKSPACE_COORDINATION_BUSY'});
+    assert.deepEqual(await fs.readFile(path.join(lock,'owner.json')),before);
+  } finally { await guard.stop(); }
+  await owner.unlock();await assert.rejects(fs.access(lock),{code:'ENOENT'});
+});
+
+test('two real MCP recovery requests for one fingerprint grant exactly one owner',{skip:process.platform!=='win32'},async t=>{
+  const {workspace,lock,connect}=await fixture(t);
+  const first=await connect(),second=await connect(),third=await connect();
+  const old=await diagnose(first.client);
+  process.kill(first.transport.pid,'SIGKILL');await first.client.close();
+  const request=client=>client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:old.lock.fingerprint,confirm:true}});
+  const results=await Promise.all([request(second.client),request(third.client)]);
+  assert.equal(results.filter(result=>!result.isError).length,1);
+  const refused=results.find(result=>result.isError);
+  assert.ok(['WORKSPACE_COORDINATION_BUSY','WORKSPACE_LOCK_CHANGED'].includes(refused.structuredContent.error.code));
+  const reports=await Promise.all([diagnose(second.client),diagnose(third.client)]);
+  assert.equal(reports.filter(report=>report.mode==='owner').length,1);
+  assert.equal((await fs.readdir(path.join(workspace,'lock-recoveries'))).length,1);
+  const winner=results[0].isError ? third : second,loser=results[0].isError ? second : third;
+  await loser.client.close();
+  assert.equal(JSON.parse(await fs.readFile(path.join(lock,'owner.json'))).pid,winner.transport.pid);
+  const contender=await connect();assert.equal((await diagnose(contender.client)).mode,'diagnostic');
+  await contender.client.close();await winner.client.close();
+  await assert.rejects(fs.access(lock),{code:'ENOENT'});
+});
+
+test('a known exited v1 owner is still refused because it did not use the recovery protocol',{skip:process.platform!=='win32'},async t=>{
+  const {workspace,lock,connect}=await fixture(t);
+  const first=await connect();
+  process.kill(first.transport.pid,'SIGKILL');await first.client.close();
+  const file=path.join(lock,'owner.json'),record=JSON.parse(await fs.readFile(file));
+  record.version=1;delete record.coordination;
+  const raw=JSON.stringify(record);await fs.writeFile(file,raw);
+  const next=await connect(),diagnostic=await diagnose(next.client);
+  assert.equal(diagnostic.holder.state,'exited');assert.equal(diagnostic.recovery.reason,'LEGACY_LOCK_PROTOCOL');
+  const result=await next.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:diagnostic.lock.fingerprint,confirm:true}});
+  assert.equal(result.structuredContent.error.code,'WORKSPACE_RECOVERY_REFUSED');
+  await next.client.close();assert.equal(await fs.readFile(file,'utf8'),raw);
+  await assert.rejects(fs.access(path.join(workspace,'lock-recoveries')),{code:'ENOENT'});
+});
+
+test('archive setup failure preserves the original lock and keeps the caller diagnostic',{skip:process.platform!=='win32'},async t=>{
+  const {workspace,lock,connect}=await fixture(t);
+  const first=await connect(),next=await connect();
+  const old=await diagnose(first.client),raw=await fs.readFile(path.join(lock,'owner.json'));
+  process.kill(first.transport.pid,'SIGKILL');await first.client.close();
+  await fs.writeFile(path.join(workspace,'lock-recoveries'),'preserve this unrelated file');
+  const result=await next.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:old.lock.fingerprint,confirm:true}});
+  assert.equal(result.structuredContent.error.code,'WORKSPACE_RECOVERY_INCOMPLETE');
+  assert.equal(result.structuredContent.error.details.phase,'preparing');
+  assert.equal(result.structuredContent.error.details.mode,'diagnostic');
+  assert.equal((await diagnose(next.client)).mode,'diagnostic');
+  assert.deepEqual(await fs.readFile(path.join(lock,'owner.json')),raw);
+  assert.equal(await fs.readFile(path.join(workspace,'lock-recoveries'),'utf8'),'preserve this unrelated file');
+});
+
+test('unsupported pipe settings are visible through MCP before any lock is created',{skip:process.platform!=='win32'},async t=>{
+  const {workspace,lock,connect}=await fixture(t);
+  const {client}=await connect({...process.env,NODE_PENDING_PIPE_INSTANCES:'1'});
+  const report=await diagnose(client);
+  assert.equal(report.mode,'diagnostic');assert.equal(report.lock.state,'absent');
+  assert.equal(report.startupIssue.code,'WORKSPACE_COORDINATION_UNAVAILABLE');
+  assert.equal((await client.callTool({name:'we_project_list',arguments:{}})).structuredContent.error.code,'WORKSPACE_LOCKED');
+  await client.close();await assert.rejects(fs.access(lock),{code:'ENOENT'});
+  assert.deepEqual(await fs.readdir(workspace),[]);
 });

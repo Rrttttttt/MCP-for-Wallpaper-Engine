@@ -13,8 +13,12 @@ const projects = new Projects(config), engine = new Engine(config, projects);
 if (process.argv.includes('--probe')) {
   console.log(json(await engine.probe()));
 } else {
+  let startupIssue:{code:string;message:string}|undefined;
   try { await projects.init(); }
-  catch(e) { if (!(e instanceof Fault) || e.code !== 'WORKSPACE_LOCKED') throw e; }
+  catch(e) {
+    if (!(e instanceof Fault) || !['WORKSPACE_LOCKED','WORKSPACE_COORDINATION_BUSY','WORKSPACE_COORDINATION_UNAVAILABLE'].includes(e.code)) throw e;
+    startupIssue={code:e.code,message:e.message};
+  }
   // ponytail: serialize all tools in one process; use per-project queues if throughput becomes a real requirement.
   let queue: Promise<unknown> = Promise.resolve();
   let stopping = false;
@@ -23,11 +27,11 @@ if (process.argv.includes('--probe')) {
   const output = (value: Record<string, unknown>): CallToolResult => ({ content: [{ type: 'text', text: json(value) }], structuredContent: value });
   const factory = () => {
     const server = new McpServer({ name: 'wallpaper-engine-mcp', version: '0.1.0' });
-    function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, handler: (args: z.infer<z.ZodObject<S>>) => Promise<any>, readOnly = false) {
-      server.registerTool(name, { description, inputSchema: z.object(shape), annotations: { readOnlyHint: readOnly, destructiveHint: false, openWorldHint: false } }, async args => serialize(async () => {
+    function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, handler: (args: z.infer<z.ZodObject<S>>) => Promise<any>, readOnly = false, destructive = false) {
+      server.registerTool(name, { description, inputSchema: z.object(shape), annotations: { readOnlyHint: readOnly, destructiveHint: destructive, openWorldHint: false } }, async args => serialize(async () => {
         try {
           if (stopping) throw new Fault('SERVER_STOPPING','Server is shutting down; no new tool operation will be started.');
-          if (name !== 'we_workspace_diagnose') await projects.lock.assertOwned();
+          if (!['we_workspace_diagnose','we_workspace_recover'].includes(name)) await projects.lock.assertOwned();
           const result = await handler(args);
           if (result?.report && result?.images) {
             const response = output(result.report);
@@ -41,7 +45,8 @@ if (process.argv.includes('--probe')) {
         }
       }));
     }
-    tool('we_workspace_diagnose','Read only the configured workspace lock, recorded owner and local process start identity. Available even when workspace acquisition fails. Unknown means unproven, not stale. No unlock, process termination or recovery.',{},() => projects.lock.diagnose(),true);
+    tool('we_workspace_diagnose','Read only the configured workspace lock, recorded owner, local process start identity and startup blockage. Available even when workspace acquisition fails. Unknown means unproven, not stale. No unlock, process termination or recovery.',{},async() => {const report=await projects.lock.diagnose();return {...report,startupIssue:report.mode === 'owner' ? null : startupIssue ?? null}},true);
+    tool('we_workspace_recover','Explicitly recover only a compatible lock whose recorded local owner is proven exited. Requires the current diagnostic fingerprint and confirm:true. Rechecks under cross-process coordination, archives old lock and preview registry, then acquires a new lock. Refuses active, unknown and legacy locks; never kills processes, rolls back projects or adopts previews.',{expectedFingerprint:rev,confirm:z.literal(true)},a=>projects.recover(a.expectedFingerprint),false,true);
     tool('we_environment_probe','Read configured engine version and actual capability evidence. Requires workspace ownership. Does not change engine settings.',{},() => engine.probe(),true);
     tool('we_project_list','Discover projects only beneath configured roots; external sources are read-only.', { type: z.enum(['web','scene','video']).optional(), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }, a => projects.list(a.type,a.offset,a.limit),true);
     tool('we_project_inspect','Return content revision, manifest, bounded file inventory and optionally up to 256 KiB of requested source text.',{ projectId: pid, readFiles: z.array(z.string()).max(20).default([]) },a => projects.inspect(a.projectId,a.readFiles),true);

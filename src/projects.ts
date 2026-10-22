@@ -118,6 +118,12 @@ export class Projects {
     catch(e) { await this.lock.release(); throw e; }
   }
   async unlock() { await this.lock.release(); }
+  async recover(expectedFingerprint:string) {
+    const result=await this.lock.recover(expectedFingerprint);
+    try { await noLinks(this.root);await fs.mkdir(this.root,{recursive:true}); }
+    catch { throw new Fault('WORKSPACE_RECOVERY_INCOMPLETE','Lock acquired but project directory initialization failed. Diagnose before retrying.',result); }
+    return result;
+  }
   async resolve(id: string, write = false) {
     await this.lock.assertOwned();
     const [source, ...parts] = id.split('/');

@@ -139,3 +139,66 @@ node .we-mcp/diagnose-workspace-lock.mjs
 5. **十倍规模首先受限之处**：单队列和每次调用的锁文件核验会增加 I/O，Windows 进程诊断每次需启动一个有期限的系统查询；多个恢复者的竞争仍未解决。本轮不增加缓存或抢锁以换取表面吞吐。
 
 未完成/未验收：受控恢复工具、恢复与获取之间的跨进程协调、实际 OS PID 复用、真实 ACL 拒绝、恶意外部目录替换竞态、非 Windows 进程身份、原临时客户端卡住的根因，以及原空锁的历史持有者。回滚时应先正常结束本版持有者并确认其锁已释放，再撤销本次提交并构建；本轮代码基线为 `1358267`。
+
+## 第 3 步：跨进程协调与显式恢复
+
+2026-10-22，实现基线 `34d9746`。前两节是历史记录；“恢复未实现/available 固定 false”等描述不再代表本节版本。当前总计 15 个 MCP 工具。
+
+### 方案与来源
+
+沿用第 1 步的三个开源锁库比较，本步没有新增依赖或移植第三方代码。单独的目录 guard 也会遗留；按时间抢锁或仅 rename 不能满足本项目的身份和竞争约束。这里使用 Node 标准库的 Windows 命名管道作为短临界区，原目录锁继续表示工作区持有权。
+
+[Node 24.15 IPC 文档](https://github.com/nodejs/node/blob/v24.15.0/doc/api/net.md#ipc-support) 说明 Windows 管道随持有进程退出移除；[同版本 libuv 源码](https://github.com/nodejs/node/blob/v24.15.0/deps/uv/src/win/pipe.c) 的首次实例排他创建，是本机单例验证的依据。实现按工作区目录 dev/ino/birthtime 的哈希选管道名，显式 exclusive 监听，不依赖路径大小写区分，不接受管道中的应用命令；连接立即断开。获取、正常释放和恢复都经同一入口，竞争最多等待约 1 秒后报告忙，计时使用单调时钟。
+
+[Node issue #65057](https://github.com/nodejs/node/issues/65057) 报告了非默认 NODE_PENDING_PIPE_INSTANCES 与失败绑定时的原生崩溃。当前未配置该变量的 Node 24.15.0/libuv 1.51.0 已通过测试；配置了它时保守拒绝协调，并通过 MCP startupIssue 展示原因，不修改运行环境。卷类型通过系统 [DriveInfo](https://learn.microsoft.com/en-us/dotnet/api/system.io.driveinfo.driveformat) 只读查询，无需新的 helper。
+
+### 文件与接口
+
+| 文件 | 本轮改动 |
+| --- | --- |
+| `src/workspace.ts` | 共用 OS 互斥；Windows 新锁记录 version:2 与 windows-pipe-v1；读取/归档边界；恢复资格核验和审计记录。version:1 保持可诊断，不升级、不回收。 |
+| `src/projects.ts` | 恢复取得锁后初始化项目目录，失败明确报告已取得锁但工程目录未就绪。 |
+| `src/index.ts` | 注册 we_workspace_recover；标注会改变锁状态；诊断/恢复以外仍要求持有锁。startupIssue 保留获取失败原因。 |
+| `test/workspace-lock.test.mjs` | 扩充真实双会话恢复、互斥竞争、归档失败、旧协议拒绝和配置不可用等检查。 |
+| `test/stdio.test.mjs` | 正常协议工具数更新为 15。 |
+| `README.md` 与本报告 | 使用步骤、错误语义、适用条件与验收边界。 |
+
+恢复调用必须携带最新 expectedFingerprint 和 confirm:true；不接受任意路径、PID 或强制开关。只有本机固定 NTFS 上、采用新协调协议的锁，且原持有者明确退出时才成为候选。活跃、PID 启动身份不匹配、未知、旧版记录、缺少身份、网络/其他文件系统或查询失败均拒绝。available:true 只是采样时的候选状态，执行时在互斥内重核，不能当作授权或预留。
+
+成功流程：写 prepared 审计 → 有界复制旧 active-previews（最多 1 MiB）→ 再核指纹 → 归档旧锁目录并验证 → 写 archived 审计 → 排他取得新锁 → 写 acquired 审计。归档位于工作区 lock-recoveries/UUID，不删除历史证据，不改工程内容、不回滚 checkpoint、不接管窗口，也不覆盖当前注册表。恢复后同一 MCP 会话取得普通工具权限。
+
+错误包括 WORKSPACE_LOCK_CHANGED（指纹过期）、WORKSPACE_RECOVERY_REFUSED（资格不满足）、WORKSPACE_COORDINATION_BUSY/UNAVAILABLE（协调受阻）及 WORKSPACE_RECOVERY_INCOMPLETE（中途停止）。最后一种会返回阶段和当前是否持有锁；可能已经取得新锁，需先诊断，不能盲目重试。不会为了恢复错误自动回滚、覆盖现有目录或删除证据。
+
+### 验证
+
+- 修改前新增的真实 MCP 恢复检查因 Tool we_workspace_recover not found 失败；实现后通过。
+- 独立进程验证同名管道只能有一个持有者，终止本次测试子进程后可重新取得管道。生产临界区测试还验证获取、释放和恢复全部受该互斥保护；没有终止用户进程来制造条件。
+- 两个真实 MCP 客户端同时对同一旧指纹恢复，恰好一个成功，另一个报告指纹变化或互斥忙；归档仅一份，失败方退出不释放胜者锁。
+- 明确确认、指纹匹配、拒绝活跃者/旧空锁/v1、归档设置失败保留旧锁、查询失败保守判定和非默认管道设置下可达诊断均有回归。测试的 PID 启动身份不匹配与 EACCES 仍为模拟，不称为实际 OS PID 复用或 ACL 验收。
+- `npm.cmd run build` 成功。最终 `node --test` 对 test/*.test.mjs 输出 25/25 通过、无跳过；双 reporter 参数另外保存 `.we-mcp/workspace-recovery-tests.xml`，不提交运行产物。
+- 原用户故障工作区通过真实 MCP 尝试恢复，返回 OWNER_UNKNOWN/WORKSPACE_RECOVERY_REFUSED。锁指纹仍为 ee2de4502f41159842e4fc836ed7f2d51b16ed66cf093dc0268120fcc1a9550c；锁、顶层条目、注册表和配置哈希未改变。报告 `.we-mcp/workspace-lock-recovery-guard-verification.json`。
+
+本机最终构建/测试命令（reporter 的输出目录 .we-mcp 已存在）：
+
+```powershell
+npm.cmd run build
+node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=.we-mcp/workspace-recovery-tests.xml test/*.test.mjs
+```
+
+### 实机回归中的失败与恢复
+
+首次 `node scripts/verify-scene.mjs` 未出现测试预览，留下未绑定身份的注册表条目，客户端结束后留下 PID 8312 的新版锁。单独直接调用官方 CLI 也复现 WINDOW_NOT_FOUND，证明该现象不要求经过 MCP 锁路径。此处没有确认引擎内部根因；失败客户端的关闭期限与服务关闭探测期限不一致也需后续独立验收，不能反推原用户卡住的历史原因。
+
+使用新 MCP 接口确认测试锁的 PID 8312 已退出后，显式恢复成功，诊断模式转为 owner，退出后新锁正常释放。旧锁、注册表及失败报告保存在 `.we-mcp/scene-verification/data/lock-recoveries/c9083c3e-a750-4fe5-9520-432a39b52a6c/`，原始注册表 SHA-256 为 7e662942c1e45f379aa19e364e754f459133be9b6e194e468837179cabb33f6a。恢复没有接管旧预览；辅助程序只确认其唯一名称已不存在。报告 `.we-mcp/scene-test-lock-recovery-report.json`，error 为 null。
+
+沿用用户已有重启授权停止配置引擎后，引擎被自动拉起，启动脚本因此报 already running；没有再次终止或修改 CEF 配置。新的直接 CLI 检查成功，随后完整 Scene 回归通过：7 个检查点、error:null、cleanupErrors:[]，覆盖编辑/回滚/重开、两个活动预览随 EOF 关闭、锁释放和服务重启。没有修改预览实现或放宽窗口身份检查。最终测试工作区注册表为空且无锁；原用户空锁仍保留。
+
+### 第 3 步审查与剩余边界
+
+1. **为何选择**：把所有锁状态迁移放进同一 OS 临界区，防止恢复者删除新持有者的锁；归档保留原始证据。标准库即可实现，无新守护进程或依赖。
+2. **更简单的方案**：仅目录 guard 会重现遗留 guard 问题；仅 rename/指纹不能排除多进程窗口；超时抢锁不能证明持有者已退出，因此不采用。
+3. **架构约束**：继续单工作区单写者、串行工具、路径安全和会话预览归属。旧协议只读兼容，不能静默宣称其参与新协调；新恢复不接管任何旧窗口。
+4. **绕路/技术债**：没有按固定 PID 放行、跳过验证、强制删锁或改测试预期掩盖失败。模拟与临时诊断脚本仅用于验证。恢复是受协调的多步操作，不是完整持久事务：创建目录后、身份写完前崩溃仍可能留下 unknown 空锁；磁盘断电持久性和逐指令崩溃未验收。
+5. **十倍规模首要限制**：同工作区状态迁移串行且系统查询占用临界区，竞争会忙，没有公平性或吞吐保证。网络文件系统、跨机器与外部强行替换目录不在本协议保证内，不以缓存或更激进回收扩展范围。
+
+未完成：第 4 步完整异常场景验收、恢复各阶段崩溃、真实 ACL/PID 复用、原旧空锁的安全人工处理流程，以及失败预览下客户端/服务退出期限的专项验收。原保存报告卡住的历史根因仍未确认。本轮只交付第 3 步；回滚基线 `34d9746`，先正常结束本版持有会话，确认锁已释放，再撤销提交并构建，避免带活动 v2 锁直接降级。
