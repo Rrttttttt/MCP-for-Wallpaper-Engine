@@ -5,11 +5,12 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { once, on } from 'node:events';
 import { promisify } from 'node:util';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { Projects } from '../dist/projects.js';
+import { readTree, revision } from '../dist/files.js';
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(),'we-mcp-lock-'));
@@ -21,10 +22,11 @@ async function fixture(t) {
     assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir())+path.sep+'we-mcp-lock-'));
     await fs.rm(directory,{recursive:true,force:true});
   });
-  return {directory,workspace,config,lock:path.join(workspace,'server.lock'),connect:env=>connect(config,clients,env)};
+  return {directory,workspace,config,lock:path.join(workspace,'server.lock'),connect:(env,preload)=>connect(config,clients,env,preload)};
 }
-async function connect(config,clients,env) {
-  const transport = new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/index.js',import.meta.url)),'--config',config],stderr:'pipe',env});
+async function connect(config,clients,env,preload) {
+  const args=preload?['--import',new URL('./fixtures/recovery-interrupt.mjs',import.meta.url).href]:[];
+  const transport = new StdioClientTransport({command:process.execPath,args:[...args,fileURLToPath(new URL('../dist/index.js',import.meta.url)),'--config',config],stderr:'pipe',env});
   const client = new Client({name:'workspace-lock-test',version:'1'});
   transport.stderr?.resume();
   clients.push(client);
@@ -319,4 +321,134 @@ test('unsupported pipe settings are visible through MCP before any lock is creat
   assert.equal((await client.callTool({name:'we_project_list',arguments:{}})).structuredContent.error.code,'WORKSPACE_LOCKED');
   await client.close();await assert.rejects(fs.access(lock),{code:'ENOENT'});
   assert.deepEqual(await fs.readdir(workspace),[]);
+});
+
+async function recoveryFixture(t,point,action='kill') {
+  const f=await fixture(t),first=await f.connect();
+  const source=await first.client.callTool({name:'we_project_create',arguments:{name:'crash-source',title:'Recovery crash source'}});
+  assert.equal(source.isError,undefined);
+  const projectId=source.structuredContent.projectId;
+  const edit=await first.client.callTool({name:'we_project_apply',arguments:{projectId,expectedRevision:source.structuredContent.revision,changes:[{path:'note.txt',content:'Keep this source and checkpoint'}]}});
+  assert.equal(edit.isError,undefined);assert.ok(edit.structuredContent.checkpointId);
+  const registry=Buffer.from('[{"previewId":"11111111-1111-4111-8111-111111111111","windowName":"historical-evidence-only"}]');
+  await fs.writeFile(path.join(f.workspace,'active-previews.json'),registry);
+  const owner=await fs.readFile(path.join(f.lock,'owner.json'));
+  const baseline={};
+  for(const name of ['projects','checkpoints','origins']) baseline[name]=revision(await readTree(path.join(f.workspace,name)));
+  const config=await fs.readFile(f.config);
+  process.kill(first.transport.pid,'SIGKILL');await first.client.close();
+  const recovering=await f.connect({...process.env,WE_TEST_RECOVERY_WORKSPACE:f.workspace,WE_TEST_RECOVERY_POINT:point,WE_TEST_RECOVERY_ACTION:action},true);
+  const evidence=await diagnose(recovering.client);
+  assert.equal(evidence.holder.state,'exited');assert.equal(evidence.recovery.available,true);
+  async function unchanged() {
+    for(const [name,hash] of Object.entries(baseline)) assert.equal(revision(await readTree(path.join(f.workspace,name))),hash,name);
+    assert.deepEqual(await fs.readFile(f.config),config);
+    assert.deepEqual(await fs.readFile(path.join(f.workspace,'active-previews.json')),registry);
+  }
+  return {...f,recovering,evidence,owner,registry,projectId,revision:edit.structuredContent.revision,unchanged,
+    recover:()=>recovering.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:evidence.lock.fingerprint,confirm:true}})};
+}
+async function reachedCheckpoint(transport,point) {
+  let text='';
+  for await(const [chunk] of on(transport.stderr,'data',{signal:AbortSignal.timeout(15000)})) {
+    text+=String(chunk);
+    if(text.includes('WE_TEST_RECOVERY_POINT:'+point+'\n')) return;
+  }
+  throw new Error('Recovery process ended before checkpoint '+point);
+}
+
+const crashCases=[
+  {point:'prepared-temporary',audit:null,current:'old',copied:false,moved:false},
+  {point:'audit-prepared',audit:'prepared',current:'old',copied:false,moved:false},
+  {point:'registry-copied',audit:'prepared',current:'old',copied:true,moved:false},
+  {point:'lock-renamed',audit:'prepared',current:'absent',copied:true,moved:true},
+  {point:'audit-archived',audit:'archived',current:'absent',copied:true,moved:true},
+  {point:'new-lock-directory',audit:'archived',current:'empty',copied:true,moved:true},
+  {point:'partial-owner',audit:'archived',current:'partial',copied:true,moved:true},
+  {point:'owner-written',audit:'archived',current:'new',copied:true,moved:true},
+  {point:'acquired-temporary',audit:'archived',current:'new',copied:true,moved:true},
+  {point:'audit-acquired',audit:'acquired',current:'new',copied:true,moved:true}
+];
+
+test('recovery process kills at ten filesystem boundaries preserve evidence and never grant an unowned session writes',{skip:process.platform!=='win32'},async t=>{
+  for(const scenario of crashCases) await t.test(scenario.point,async t=>{
+    const f=await recoveryFixture(t,scenario.point);
+    const checkpoint=reachedCheckpoint(f.recovering.transport,scenario.point);
+    const outcome=f.recover().then(result=>({result}),error=>({error}));
+    await checkpoint;
+    // Even the gaps without a directory lock remain protected while the recoverer lives.
+    await assert.rejects(new Projects({workspace:f.workspace,projectRoots:[],timeoutMs:1000}).init(),{code:'WORKSPACE_COORDINATION_BUSY'});
+    const recoveringPid=f.recovering.transport.pid;
+    process.kill(recoveringPid,'SIGKILL');await f.recovering.client.close();
+    assert.ok((await outcome).error,'A killed recovery cannot return a successful MCP response');
+    const recoveries=path.join(f.workspace,'lock-recoveries');
+    const entries=await fs.readdir(recoveries);assert.equal(entries.length,1);
+    const archive=path.join(recoveries,entries[0]),saved=await readTree(archive);
+    if(scenario.audit) assert.equal(JSON.parse(saved.get('record.json')).state,scenario.audit);
+    else assert.equal(saved.has('record.json'),false);
+    if(scenario.point.endsWith('-temporary')) {
+      const temporaries=[...saved.keys()].filter(name=>/^record\.json\.[a-f0-9-]+\.tmp$/.test(name));
+      assert.equal(temporaries.length,1);
+      assert.equal(JSON.parse(saved.get(temporaries[0])).state,scenario.point.split('-')[0]);
+    }
+    if(scenario.copied) assert.deepEqual(saved.get('active-previews.json'),f.registry);
+    else assert.equal(saved.has('active-previews.json'),false);
+    if(scenario.moved) assert.deepEqual(saved.get('server.lock/owner.json'),f.owner);
+    else assert.deepEqual(await fs.readFile(path.join(f.lock,'owner.json')),f.owner);
+    if(scenario.current==='absent') await assert.rejects(fs.access(f.lock),{code:'ENOENT'});
+    if(scenario.current==='empty') assert.deepEqual(await fs.readdir(f.lock),[]);
+    if(scenario.current==='partial') {
+      const partial=await fs.readFile(path.join(f.lock,'owner.json'));
+      assert.equal(partial.length,12);assert.throws(()=>JSON.parse(partial.toString()));
+    }
+    if(scenario.current==='new') assert.equal(JSON.parse(await fs.readFile(path.join(f.lock,'owner.json'))).pid,recoveringPid);
+    const observer=await f.connect(),diagnostic=await diagnose(observer.client);
+    if(['empty','partial'].includes(scenario.current)) {
+      assert.equal(diagnostic.mode,'diagnostic');assert.equal(diagnostic.holder.state,'unknown');
+      assert.equal(diagnostic.recovery.available,false);
+      const refused=await observer.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:diagnostic.lock.fingerprint,confirm:true}});
+      assert.equal(refused.structuredContent.error.code,'WORKSPACE_RECOVERY_REFUSED');
+      assert.equal((await observer.client.callTool({name:'we_project_create',arguments:{name:'blocked',title:'Blocked'}})).structuredContent.error.code,'WORKSPACE_LOCKED');
+      await observer.client.close();
+      const after=await f.connect();assert.equal((await diagnose(after.client)).lock.fingerprint,diagnostic.lock.fingerprint);
+      await after.client.close();
+      assert.deepEqual(await fs.readdir(recoveries),entries,'Unknown locks cannot create another recovery archive');
+    } else {
+      if(scenario.current==='absent') {
+        assert.equal(diagnostic.mode,'owner');
+        const stale=await observer.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:f.evidence.lock.fingerprint,confirm:true}});
+        assert.equal(stale.structuredContent.error.code,'WORKSPACE_LOCK_CHANGED');
+      } else {
+        assert.equal(diagnostic.mode,'diagnostic');assert.equal(diagnostic.holder.state,'exited');assert.equal(diagnostic.recovery.available,true);
+        assert.equal((await observer.client.callTool({name:'we_project_list',arguments:{}})).structuredContent.error.code,'WORKSPACE_LOCKED');
+        const recovered=await observer.client.callTool({name:'we_workspace_recover',arguments:{expectedFingerprint:diagnostic.lock.fingerprint,confirm:true}});
+        assert.equal(recovered.isError,undefined);assert.equal(recovered.structuredContent.previewOwnership,'not-adopted');
+      }
+      const inspected=await observer.client.callTool({name:'we_project_inspect',arguments:{projectId:f.projectId}});
+      assert.equal(inspected.structuredContent.revision,f.revision);
+      const notAdopted=await observer.client.callTool({name:'we_preview_close',arguments:{previewId:'11111111-1111-4111-8111-111111111111'}});
+      assert.equal(notAdopted.structuredContent.error.code,'PREVIEW_NOT_FOUND');
+      await observer.client.close();await assert.rejects(fs.access(f.lock),{code:'ENOENT'});
+    }
+    assert.deepEqual(await readTree(archive),saved,'Further diagnosis/recovery must preserve the interrupted archive');
+    await f.unchanged();
+  });
+});
+
+test('returned audit failures expose the actual phase and ownership without overwriting previous evidence',{skip:process.platform!=='win32'},async t=>{
+  for(const [point,phase,mode,state] of [['audit-archived','archived','diagnostic','prepared'],['audit-acquired','acquired','owner','archived']]) await t.test(point,async t=>{
+    const f=await recoveryFixture(t,point,'throw'),result=await f.recover();
+    assert.equal(result.structuredContent.error.code,'WORKSPACE_RECOVERY_INCOMPLETE');
+    assert.deepEqual({...result.structuredContent.error.details,recoveryId:undefined,archive:undefined},{recoveryId:undefined,archive:undefined,phase,mode,cause:'EIO'});
+    const archive=result.structuredContent.error.details.archive;
+    assert.equal(JSON.parse(await fs.readFile(path.join(archive,'record.json'))).state,state);
+    assert.deepEqual(await fs.readFile(path.join(archive,'server.lock','owner.json')),f.owner);
+    const diagnostic=await diagnose(f.recovering.client);assert.equal(diagnostic.mode,mode);
+    const listed=await f.recovering.client.callTool({name:'we_project_list',arguments:{}});
+    if(mode==='owner') assert.equal(listed.structuredContent.total,1);
+    else assert.equal(listed.structuredContent.error.code,'WORKSPACE_LOCKED');
+    await f.recovering.client.close();await assert.rejects(fs.access(f.lock),{code:'ENOENT'});
+    const next=await f.connect();assert.equal((await diagnose(next.client)).mode,'owner');await next.client.close();
+    await f.unchanged();
+  });
 });

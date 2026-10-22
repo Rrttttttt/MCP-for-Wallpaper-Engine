@@ -332,3 +332,86 @@ git diff --check
 未验收：窗口在确认不存在后才被延迟 CLI 创建、helper 挂起或系统负载使其超过客户端期限、关闭时仍有长工具执行、断电/强杀和各恢复阶段崩溃、真实 ACL/PID 复用。检查错误仍保留记录；进程确实被强杀时，仍可能需要既有受控锁恢复。原保存报告卡住的完整历史原因未确认。
 
 本次回滚基线 `5ffd222`。回滚前应正常结束相关服务并确认锁释放；撤销本次提交后重新构建。下一独立步骤为恢复各阶段的崩溃验收，不在本次继续修改。
+
+## 恢复各阶段的进程中断验收
+
+2026-10-22，基线 `0d92cfe`。本轮为独立验收任务，只新增测试及文档，未修改产品锁协议、恢复策略、工程或引擎实现。结论是：十个代表性中断点均满足证据保留和权限保护要求，其中八个可以重新启动或显式恢复；空新锁及半写身份两个中断点仍需人工处理。**这不是所有中断都能恢复的验收结论。**
+
+### 实现分析与参考
+
+恢复涉及 `src/workspace.ts` 的 coordinate / recover / create、`src/files.ts` 的 atomicWrite、`src/projects.ts` 的 recover 后初始化，以及 `src/index.ts` 的 MCP 错误包装和权限检查。流程为 prepared 审计 → 复制注册表 → rename 旧锁 → archived 审计 → 创建新锁并写身份 → acquired 审计。审计和多个文件并非一个事务；新锁 mkdir 与 owner.json 写入之间也有空隙。
+
+开发前重新搜索开源实现与维护者社区。以下为查询快照，仅用于方法比较，不以 Star 判断正确性：
+
+| 项目 | 功能、维护及文档 | Star / 许可 / 技术栈 | 复用判断 |
+| --- | --- | --- | --- |
+| [moxystudio/node-proper-lockfile](https://github.com/moxystudio/node-proper-lockfile) | 跨进程目录锁、更新时间与失效检测，有 README 和[问题讨论](https://github.com/moxystudio/node-proper-lockfile/issues)；[仓库元数据](https://api.github.com/repos/moxystudio/node-proper-lockfile)显示最近推送为 2023-10-25，不能称为近期活跃。 | 285 / MIT / JavaScript | 可参考异常退出和失效锁讨论；其按时间失效的协议不能替代本项目的身份及互斥约束，不移植代码。 |
+| [npm/write-file-atomic](https://github.com/npm/write-file-atomic) | 原子文件替换，有 README、[发布记录](https://github.com/npm/write-file-atomic/releases)及[文件操作错误注入测试](https://github.com/npm/write-file-atomic/blob/main/test/basic.js)；本轮未取得最近推送日期。 | 256 / ISC / JavaScript | 参考在 I/O 边界注入故障的测试方法；只解决单文件写入，不能代替多文件锁迁移。无需新增运行依赖。 |
+
+本项目直接复用现有 node:test、真实 MCP 客户端、临时工作区和 Node 内置模块。Windows 的强制终止按 [Node 信号文档](https://nodejs.org/docs/latest-v24.x/api/process.html#signal-events)理解为进程被无条件结束；这不是正常 EOF 清理。关于落盘，[FileHandle.sync 文档](https://nodejs.org/docs/latest-v24.x/api/fs.html#filehandlesync)区分了向存储设备请求刷新，本轮没有模拟断电，也没有为 atomicWrite 添加持久性保证。
+
+### 方法与文件
+
+| 文件 | 本轮改动 |
+| --- | --- |
+| `test/workspace-lock.test.mjs` | 复用原测试夹具，增加可选子进程 preload；建立十个中断场景和两个返回错误场景，校验真实 MCP 结果、跨进程互斥、归档、权限及数据不变。 |
+| `test/fixtures/recovery-interrupt.mjs` | 只在测试自有子进程替换指定工作区的 mkdir/writeFile/rename 边界。完成目标文件操作后暂停并写 stderr 标记，父进程随后 SIGKILL。另可在审计 rename 前返回 EIO。产品不识别这些测试环境变量或参数。 |
+| `README.md`、本文 | 明确中断后如何依据当前锁及归档处理，区分可恢复状态与安全拒绝。 |
+
+每个场景使用独立临时目录：通过 MCP 创建一个源工程、实际修改并产生一个完整检查点，保存 projects / checkpoints / origins 的内容 revision、原配置和一条虚构历史预览注册表。随后仅终止该测试创建的原持有者，以真实 Windows 进程查询取得恢复资格。
+
+恢复进程暂停时，另一个 Projects 实例获取同工作区均报告 WORKSPACE_COORDINATION_BUSY，包含当前 server.lock 暂时不存在的阶段。强制结束恢复进程后，待处理 MCP 调用均断开而非返回成功；新会话能重新取得 OS 互斥，并按当前目录状态获取、诊断或恢复。没有结束用户进程，没有打开或接管真实壁纸窗口。
+
+半写身份场景由夹具仅写 owner.json 前 12 字节，再真实终止进程；它模拟内容不完整，不声称捕获了内核恰好写入一半的随机时刻。其他中断均发生在真实文件操作完成后、该调用返回产品上层之前。
+
+### 中断矩阵
+
+| 中断点 | 已提交审计 | 终止后的当前锁 | 新会话处理及结果 |
+| --- | --- | --- | --- |
+| prepared 临时文件写完、尚未替换 | 无 record.json，保留 prepared 临时文件 | 原锁 | 诊断已退出持有者，显式恢复成功；原临时证据不被清理。 |
+| prepared 审计提交后 | prepared | 原锁 | 重新诊断并显式恢复成功。 |
+| 旧注册表复制后 | prepared | 原锁 | 显式恢复成功；初次归档中的注册表字节保留。 |
+| 旧锁 rename 后、archived 审计前 | prepared | 不存在 | 新会话正常获取；旧锁证据已在归档，旧指纹恢复请求拒绝。 |
+| archived 审计提交后 | archived | 不存在 | 新会话正常获取。 |
+| 新 server.lock 目录创建后 | archived | 空目录 | holder:unknown；拒绝普通工具及恢复，退出和再次诊断均保留同一锁指纹，需人工处理。 |
+| owner.json 部分写入后 | archived | 不完整 JSON | 同上，半写内容不会变成持有者身份或恢复资格，需人工处理。 |
+| 完整 owner.json 写完、内存所有权记录前 | archived | 完整新身份 | 新会话诊断恢复进程已退出，显式恢复成功。 |
+| acquired 临时文件写完、尚未替换 | archived，另有 acquired 临时文件 | 完整新身份 | 显式恢复成功；未提交临时审计仍保留在原归档。 |
+| acquired 审计提交后、MCP 返回前 | acquired | 完整新身份 | 原调用没有成功响应；新会话重新诊断并显式恢复成功，不能将旧审计当作当前所有权。 |
+
+全部场景验证 projects / checkpoints / origins 内容 revision、配置字节和当前预览注册表字节未变。已有归档中的全部文件在后续诊断/恢复前后保持一致。取得所有权后的新会话 inspect 返回原工程 revision；对虚构旧 previewId 执行 close 返回 PREVIEW_NOT_FOUND，确认没有从注册表接管预览。未知锁分支持续拒绝写入，且不产生新的恢复归档。
+
+### 返回错误的边界
+
+另有两个不终止进程的 EIO 注入，均通过 MCP 返回 WORKSPACE_RECOVERY_INCOMPLETE：
+
+- archived 审计替换失败：phase:archived、mode:diagnostic；旧锁已归档，审计仍 prepared，当前无锁；该诊断会话仍拒绝工程工具，正常退出后新会话可以获取。
+- acquired 审计替换失败：phase:acquired、mode:owner；新锁已取得，审计仍 archived；同一会话诊断和工程列表均证明其持有权，正常退出释放锁。不能把错误响应等同于没有执行。
+
+这两项保留旧锁归档和源数据，不会覆盖旧预览注册表。测试 EIO 是受控错误，不是真实磁盘损坏或 ACL 拒绝。
+
+### 验证结果
+
+初次测试在 owner-written、acquired-temporary、audit-acquired 三个场景有断言失败：测试在 client.close 后读取 transport.pid，SDK 已将其置为 null。改为终止前保存 PID 后通过；没有为此修改产品代码或放宽期望。其他初次场景已通过。
+
+```powershell
+node --check test/fixtures/recovery-interrupt.mjs
+node --check test/workspace-lock.test.mjs
+node --test --test-name-pattern='recovery process kills|returned audit failures' --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=.we-mcp/recovery-crash-tests.xml test/workspace-lock.test.mjs
+npm.cmd test
+git diff --check
+```
+
+针对性检查 14/14 通过（包含两个测试组），十个真实强制终止点、两个返回错误点均通过，无跳过；JUnit 保存在忽略的 `.we-mcp/recovery-crash-tests.xml`。`npm.cmd test` 构建成功，全套 44/44 通过、无跳过，约 76 秒。产品源码未变，本轮无需重新进行引擎画面验收；实际进程查询、文件系统、命名管道和 MCP 都在本机 Windows 上运行，未用进程/卷查询模拟替代。
+
+### 审查与未完成事项
+
+1. **为何选择**：必须验证恢复进程真实消失后的 OS 互斥释放和下一 MCP 会话；只抛异常会运行 finally，无法覆盖这类中断。
+2. **更简单的实现**：复用原测试夹具，仅加一个 preload 文件和参数化矩阵；无需产品故障开关、额外测试框架、随机时序碰撞或新依赖。
+3. **架构和隐藏约束**：注入限定在测试进程的指定目录，生产模块、工具数、锁格式及未知锁保护均未变。只终止测试自行创建的进程；临时目录清理前核对绝对路径位于测试前缀内，不清理用户工作区。
+4. **绕路与技术债**：未将未知锁改判为失效来取得“全可恢复”结果；两个阻塞状态被明确保留为可用性限制。测试依赖文件边界和审计格式，格式变化时应同步调整；其余系统调用使用真实实现。
+5. **十倍规模首要限制**：矩阵串行运行、每例多次系统查询，测试时长随边界数量增长；本次针对性约 55 秒。生产多阶段操作仍可能留下需人工处置的新空锁/半写身份，不能靠扩大测试消除该协议空隙。
+
+未覆盖：逐机器指令及全部系统调用边界、实际断电/设备缓存/文件系统损坏、真实 ACL 拒绝和 OS PID 复用、外部恶意目录替换、用户窗口或旧工程的自动修复。非 Windows 按产品能力边界跳过本组，不能把本机成功当作跨平台验收。
+
+本轮回滚基线 `0d92cfe`，提交只影响测试与文档，可单独撤销，不需要更改运行现场。新增测试使用的所有锁与归档都在独立临时目录中，测试后清理；用户原工作区及旧锁归档没有改动。下一独立任务建议先设计并验证如何减少新锁空目录/半写身份的崩溃窗口，再补真实 ACL/PID 复用；本轮不擅自更改锁协议。
