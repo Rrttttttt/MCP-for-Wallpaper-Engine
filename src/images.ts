@@ -1,33 +1,10 @@
-import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
-import { Fault, hash, safeJoin, relativeFile, readTree, revision, type Config } from './files.js';
+import { Fault, hash, type Config } from './files.js';
+import { readAssetSource, prepareAssetImport, type AssetImport } from './assets.js';
 import type { Projects } from './projects.js';
 
 const maxBytes = 20 * 1024 * 1024, maxPixels = 16777216, maxEdge = 8192;
-
-async function readSource(config: Config, sourceRoot: number, sourcePath: string) {
-  const root = config.assetRoots?.[sourceRoot];
-  if (!Number.isInteger(sourceRoot) || sourceRoot < 0 || !root) throw new Fault('ASSET_ROOT_NOT_CONFIGURED', 'Select an index from configured assetRoots; no directories are enabled by default.');
-  const target = await safeJoin(root, sourcePath);
-  const handle = await fs.open(target, 'r');
-  try {
-    const before = await handle.stat();
-    if (!before.isFile() || before.nlink !== 1) throw new Fault('UNSAFE_PATH', 'Image source must be a regular file without extra hard links.');
-    if (before.size < 1 || before.size > maxBytes) throw new Fault('IMAGE_LIMIT', 'Source must be 1 byte..20 MiB.');
-    // Read at most the sampled size plus one byte, even if another process grows the file.
-    const data = Buffer.alloc(before.size + 1);
-    let length = 0;
-    while (length < data.length) {
-      const { bytesRead } = await handle.read(data, length, data.length - length, null);
-      if (!bytesRead) break;
-      length += bytesRead;
-    }
-    const after = await handle.stat();
-    if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) throw new Fault('SOURCE_CHANGED', 'Source changed while reading; inspect again.');
-    return data.subarray(0, length);
-  } finally { await handle.close(); }
-}
 
 async function metadata(data: Buffer) {
   const format = data.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) ? 'png' :
@@ -58,27 +35,13 @@ async function metadata(data: Buffer) {
 }
 
 export async function inspectImage(config: Config, sourceRoot: number, sourcePath: string) {
-  const data = await readSource(config, sourceRoot, sourcePath);
+  const data = await readAssetSource(config, sourceRoot, sourcePath, maxBytes, 'IMAGE_LIMIT');
   return { sourceRoot, sourcePath, image: await metadata(data) };
 }
 
-export async function importImage(projects: Projects, args: { projectId: string; expectedRevision: string; sourceRoot: number; sourcePath: string; expectedSourceHash: string; targetPath: string; overwrite: boolean }) {
-  relativeFile(args.targetPath);
-  const root = await projects.resolve(args.projectId, true), next = await readTree(root);
-  if (revision(next) !== args.expectedRevision) throw new Fault('REVISION_CONFLICT', 'Project changed; inspect again before importing.');
-  const existing = [...next.keys()].find(name => name.toLowerCase() === args.targetPath.toLowerCase());
-  if (existing && (existing !== args.targetPath || !args.overwrite)) throw new Fault('IMAGE_EXISTS', 'Destination already exists; use its exact spelling and explicitly enable overwrite.');
-  const parts = args.targetPath.split('/');
-  for (let i = 0; i < parts.length; i++) {
-    const parent = i === 0 ? root : await safeJoin(root, parts.slice(0, i).join('/'));
-    const names = await fs.readdir(parent).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return []; throw e; });
-    const actual = names.find(name => name.toLowerCase() === parts[i]!.toLowerCase());
-    if (actual && actual !== parts[i]) throw new Fault('INVALID_PATH', 'Destination spelling must match existing files and directories.');
-  }
-  const target = await safeJoin(root, args.targetPath);
-  const targetStat = await fs.lstat(target).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return undefined; throw e; });
-  if (targetStat && !targetStat.isFile()) throw new Fault('IMAGE_EXISTS', 'Destination is not a regular image file.');
-  const data = await readSource(projects.config, args.sourceRoot, args.sourcePath);
+export async function importImage(projects: Projects, args: AssetImport) {
+  const next = await prepareAssetImport(projects, args, 'IMAGE_EXISTS');
+  const data = await readAssetSource(projects.config, args.sourceRoot, args.sourcePath, maxBytes, 'IMAGE_LIMIT');
   if (hash(data) !== args.expectedSourceHash) throw new Fault('SOURCE_CHANGED', 'Source hash differs from the inspected image; inspect again.');
   const image = await metadata(data);
   const extensions: Record<string, string[]> = { png: ['.png'], jpeg: ['.jpg', '.jpeg'], webp: ['.webp'] };

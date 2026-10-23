@@ -6,6 +6,7 @@ import { Fault, loadConfig, readTree, json } from './files.js';
 import { Projects, validate } from './projects.js';
 import { Engine } from './engine.js';
 import { inspectImage, importImage } from './images.js';
+import { inspectMedia, importMedia } from './media.js';
 
 const configFlag = process.argv.indexOf('--config');
 const configFile = configFlag >= 0 ? process.argv[configFlag + 1]! : fileURLToPath(new URL('../we.config.json', import.meta.url));
@@ -23,17 +24,18 @@ if (process.argv.includes('--probe')) {
   // ponytail: serialize all tools in one process; use per-project queues if throughput becomes a real requirement.
   let queue: Promise<unknown> = Promise.resolve();
   let stopping = false;
+  const mediaLifetime = new AbortController();
   const serialize = <T>(work: () => Promise<T>) => { const task = queue.then(work); queue = task.catch(() => {}); return task; };
   const pid = z.string().min(1).max(300), rev = z.string().regex(/^[a-f0-9]{64}$/), values = z.record(z.string(), z.union([z.string().max(4096), z.number().finite(), z.boolean()]));
   const output = (value: Record<string, unknown>): CallToolResult => ({ content: [{ type: 'text', text: json(value) }], structuredContent: value });
   const factory = () => {
     const server = new McpServer({ name: 'wallpaper-engine-mcp', version: '0.1.0' });
-    function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, handler: (args: z.infer<z.ZodObject<S>>) => Promise<any>, readOnly = false, destructive = false) {
-      server.registerTool(name, { description, inputSchema: z.object(shape), annotations: { readOnlyHint: readOnly, destructiveHint: destructive, openWorldHint: false } }, async args => serialize(async () => {
+    function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, handler: (args: z.infer<z.ZodObject<S>>, signal: AbortSignal) => Promise<any>, readOnly = false, destructive = false) {
+      server.registerTool(name, { description, inputSchema: z.object(shape), annotations: { readOnlyHint: readOnly, destructiveHint: destructive, openWorldHint: false } }, async (args,ctx) => serialize(async () => {
         try {
           if (stopping) throw new Fault('SERVER_STOPPING','Server is shutting down; no new tool operation will be started.');
           if (!['we_workspace_diagnose','we_workspace_recover'].includes(name)) await projects.lock.assertOwned();
-          const result = await handler(args);
+          const result = await handler(args,ctx.mcpReq.signal);
           if (result?.report && result?.images) {
             const response = output(result.report);
             response.content.push(...result.images.map((i: any) => ({ type: 'image' as const, mimeType: 'image/png', data: i.data })));
@@ -63,11 +65,14 @@ if (process.argv.includes('--probe')) {
     tool('we_publish_prepare','Stage offline runtime sources and a preparation report; never packs native assets or uploads to Workshop.',{projectId:pid,intent:z.enum(['new','update']).default('new')},a => projects.publish(a.projectId,a.intent));
     tool('we_image_inspect','Inspect and fully decode a static PNG/JPEG/WebP beneath configured assetRoots. sourceRoot is its zero-based index; sourcePath is relative. Returns dimensions, alpha, orientation and SHA256 as text. No arbitrary paths or image blocks.',{sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240)},a=>inspectImage(config,a.sourceRoot,a.sourcePath),true);
     tool('we_image_import','Import the exact inspected image bytes into a managed project, using expectedSourceHash and expectedRevision. Saves a checkpoint; refuses existing destinations unless overwrite:true. Does not wire assets into HTML/CSS or compile Scene textures.',{projectId:pid,expectedRevision:rev,sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240),expectedSourceHash:rev,targetPath:z.string().min(1).max(240),overwrite:z.boolean().default(false)},a=>importImage(projects,a),false,true);
+    tool('we_media_inspect','Inspect WAV/MP3/MP4/WebM bytes beneath configured assetRoots with an isolated metadata parser. Returns duration, audio/video tracks, dimensions and SHA256 as text. Metadata-only: decoding, codecs in the engine and playback remain unverified.',{sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240)},(a,signal)=>inspectMedia(config,a.sourceRoot,a.sourcePath,AbortSignal.any([mediaLifetime.signal,signal])),true);
+    tool('we_media_import','Import exact inspected WAV/MP3/MP4/WebM bytes into a managed project using expectedSourceHash and expectedRevision. Saves a checkpoint; refuses existing paths unless overwrite:true. Does not create video wallpapers, transcode, wire references or prove playback.',{projectId:pid,expectedRevision:rev,sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240),expectedSourceHash:rev,targetPath:z.string().min(1).max(240),overwrite:z.boolean().default(false)},(a,signal)=>importMedia(projects,a,AbortSignal.any([mediaLifetime.signal,signal])),false,true);
     return server;
   };
   const handle = serveStdio(factory,{ onerror:e => console.error(e.message) });
   async function shutdown() {
     if (stopping) return; stopping = true;
+    mediaLifetime.abort();
     await queue;
     try {
       if (projects.lock.isOwner) {

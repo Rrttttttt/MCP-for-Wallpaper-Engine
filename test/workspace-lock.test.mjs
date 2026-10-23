@@ -45,7 +45,7 @@ test('legacy empty lock remains reachable through MCP without changing the works
   const before=await fs.stat(lock);
   const {client}=await connect();
   const tools=(await client.listTools()).tools;
-  assert.equal(tools.length,17);
+  assert.equal(tools.length,19);
   assert.equal(tools.find(tool=>tool.name==='we_workspace_diagnose').annotations.readOnlyHint,true);
   const report=await diagnose(client);
   assert.equal(report.mode,'diagnostic');
@@ -59,6 +59,8 @@ test('legacy empty lock remains reachable through MCP without changing the works
   assert.equal(refused.structuredContent.error.code,'WORKSPACE_RECOVERY_REFUSED');
   const previewId='11111111-1111-4111-8111-111111111111',projectId='managed/blocked';
   const blockedTools=[
+    ['we_media_inspect',{sourceRoot:0,sourcePath:'tone.wav'}],
+    ['we_media_import',{projectId,expectedRevision:'a'.repeat(64),sourceRoot:0,sourcePath:'tone.wav',expectedSourceHash:'a'.repeat(64),targetPath:'media/tone.wav'}],
     ['we_image_inspect',{sourceRoot:0,sourcePath:'source.png'}],
     ['we_image_import',{projectId,expectedRevision:'a'.repeat(64),sourceRoot:0,sourcePath:'source.png',expectedSourceHash:'a'.repeat(64),targetPath:'images/source.png'}],
     ['we_project_list',{}],['we_project_create',{name:'blocked',title:'Blocked'}],

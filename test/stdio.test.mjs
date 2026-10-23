@@ -9,18 +9,19 @@ import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { hash } from '../dist/files.js';
 
-test('real stdio handshake, 17 tools, image import/restore, project edits and clean shutdown',async t => {
+test('real stdio handshake, 19 tools, image/media import and restore, project edits and clean shutdown',async t => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(),'we-mcp-stdio-'));
   const configFile = path.join(workspace,'config.json');
   const inbox=path.join(workspace,'inbox'); await fs.mkdir(inbox);
   const png=await sharp({create:{width:32,height:16,channels:4,background:'#66aaff88'}}).png().toBuffer();
   await fs.writeFile(path.join(inbox,'source.png'),png);
+  for(const name of ['tone.wav','clip.mp4']) await fs.copyFile(new URL('./fixtures/media/'+name,import.meta.url),path.join(inbox,name));
   await fs.writeFile(configFile,JSON.stringify({workspace:path.join(workspace,'data'),assetRoots:[inbox]}));
   const transport = new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/index.js',import.meta.url)),'--config',configFile],stderr:'pipe'});
   const client = new Client({name:'smoke-test',version:'1'});
   t.after(async()=>{await client.close();await fs.rm(workspace,{recursive:true,force:true})});
   await client.connect(transport);
-  const tools = await client.listTools(); assert.equal(tools.tools.length,17);
+  const tools = await client.listTools(); assert.equal(tools.tools.length,19);
   assert.ok(tools.tools.some(tool=>tool.name==='we_workspace_diagnose'));
   assert.ok(tools.tools.some(tool=>tool.name==='we_preview_move_mouse'));
   const unknownPreview='11111111-1111-4111-8111-111111111111';
@@ -67,6 +68,18 @@ test('real stdio handshake, 17 tools, image import/restore, project edits and cl
   assert.equal(restoredImage.isError,undefined); assert.equal(restoredImage.structuredContent.revision,project.revision);
   await assert.rejects(fs.access(path.join(project.path,'images/source.png')),{code:'ENOENT'});
   assert.deepEqual(await fs.readFile(path.join(inbox,'source.png')),png);
+  for(const name of ['tone.wav','clip.mp4']) {
+    const inspected=await client.callTool({name:'we_media_inspect',arguments:{sourceRoot:0,sourcePath:name}});
+    assert.equal(inspected.isError,undefined); assert.equal(inspected.content.every(block=>block.type==='text'),true);
+    const original=await fs.readFile(path.join(inbox,name));
+    assert.equal(inspected.structuredContent.media.sha256,hash(original));
+    assert.equal(inspected.structuredContent.media.playability,'unverified');
+    const saved=await client.callTool({name:'we_media_import',arguments:{projectId:project.projectId,expectedRevision:project.revision,sourceRoot:0,sourcePath:name,expectedSourceHash:hash(original),targetPath:'media/'+name}});
+    assert.equal(saved.isError,undefined); assert.equal(saved.content.every(block=>block.type==='text'),true);
+    assert.deepEqual(await fs.readFile(path.join(project.path,'media',name)),original);
+    const restored=await client.callTool({name:'we_project_restore',arguments:{projectId:project.projectId,expectedRevision:saved.structuredContent.revision,checkpointId:saved.structuredContent.checkpointId}});
+    assert.equal(restored.isError,undefined); assert.equal(restored.structuredContent.revision,project.revision);
+  }
   const scene = await client.callTool({name:'we_project_create',arguments:{name:'scene',title:'Native Scene',templateId:'scene-orbit'}});
   assert.equal(scene.isError,undefined);
   assert.equal(scene.structuredContent.manifest.type,'scene');

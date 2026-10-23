@@ -37,7 +37,7 @@ node dist/index.js
 | `installDir` | 官方引擎安装目录，包含 wallpaper32.exe 或 wallpaper64.exe |
 | `workspace` | 受管工程、检查点、预览副本、截图和发布暂存目录；默认 `.we-mcp` |
 | `projectRoots` | 额外只读工程目录；可以是工程本身或其父目录；不扫描整盘 |
-| `assetRoots` | 允许读取图片的目录列表，默认 `[]`；图片工具使用目录索引和相对路径，不扫描整盘 |
+| `assetRoots` | 允许读取图片、音频和视频素材的目录列表，默认 `[]`；素材工具使用目录索引和相对路径，不扫描整盘 |
 | `devtoolsPort` | 手动配置的本机 CEF 调试端口；`null` 时仍可使用 CLI、工程管理和已构建的原生截图后端 |
 | `timeoutMs` | 单次操作等待上限，1000–30000 毫秒 |
 
@@ -55,7 +55,7 @@ node dist/index.js
 {"name":"we_workspace_diagnose","arguments":{}}
 ```
 
-返回 `workspace`、`mode`、`lock`、`holder` 和 `recovery`。`mode: "owner"` 表示当前会话仍持有原锁；`"diagnostic"` 表示仅可诊断及尝试受控恢复，其余 15 个工具均返回 `WORKSPACE_LOCKED`。原锁发生变化或不可读时，原持有会话的普通操作返回 `WORKSPACE_OWNERSHIP_LOST`，不会自动解锁。
+返回 `workspace`、`mode`、`lock`、`holder` 和 `recovery`。`mode: "owner"` 表示当前会话仍持有原锁；`"diagnostic"` 表示仅可诊断及尝试受控恢复，其余 17 个工具均返回 `WORKSPACE_LOCKED`。原锁发生变化或不可读时，原持有会话的普通操作返回 `WORKSPACE_OWNERSHIP_LOST`，不会自动解锁。
 
 新锁在 `server.lock/owner.json` 记录 PID、主机、平台、随机会话标识和进程启动身份。Windows 使用系统自带 PowerShell 只读查询 `Process.StartTime`，无需截图 helper；查询有 3 秒期限。旧空锁、记录损坏、异地主机、权限不足或查询失败均保持 `holder.state: "unknown"`。`"alive"`、`"exited"`、`"pid-reused"` 是采样时的身份核对结果；其中 PID 复用表示启动时间不匹配，不是只凭 PID 推断。`lock.fingerprint` 可用于识别两次诊断间的变化，不授予解锁权限。
 
@@ -112,6 +112,8 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 | `we_project_validate` | 检查 JSON、入口、HTML/CSS 引用、Web JS 语法、音频开关及 Scene 本地图片层依赖；不冒充真实引擎验证 |
 | `we_image_inspect` | 从 `assetRoots` 指定目录检查静态 PNG/JPEG/WebP，完整解码并返回尺寸、透明度、方向及 SHA256；仅返回文本 |
 | `we_image_import` | 校验源哈希与工程 revision 后原字节导入，保存检查点；默认拒绝覆盖；不自动修改素材引用 |
+| `we_media_inspect` | 从 `assetRoots` 探测 WAV/MP3/MP4/WebM，返回时长、轨道、尺寸、帧率、采样率与哈希；仅元数据，不证明可播放 |
+| `we_media_import` | 校验源哈希与工程 revision 后原字节导入媒体，保存检查点、默认拒绝覆盖；不创建视频工程或转码 |
 | `we_preview_open` | 从固定源码副本打开唯一命名窗口；每个服务会话最多登记一个 Web，Scene 可共存；返回就绪证据或未验证状态 |
 | `we_preview_set_properties` | 校验类型及范围后修改该预览的公开参数，不修改源码默认值 |
 | `we_preview_move_mouse` | 向自有 Web CEF 预览派发鼠标移动；`x/y` 为 0～1 的归一化坐标，左上 `(0,0)`、右下 `(1,1)`；不移动系统光标 |
@@ -120,6 +122,8 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 | `we_publish_prepare` | 复制运行工程到发布暂存目录并输出剩余步骤，不打包 `.pkg` 或上传 |
 
 ## 一次创作循环
+
+媒体入口复用 `assetRoots`：先 inspect，再将返回哈希传给 import；支持纯文本客户端、解析期限、MCP 取消和退出清理。单文件最多 40 MiB，工程仍受 64 MiB / 2000 文件约束。示例、格式范围及本机验收见[音视频素材入口](docs/media-import.md)。音视频播放和系统音频响应仍需独立验收。
 
 Web JS 语法检查区分 HTML 中的普通脚本与模块，覆盖内联脚本及本地 `.js` / `.mjs`。错误包含文件与行列号；损坏脚本会阻止 apply、预览和发布准备。检查只解析、不执行脚本，保留 `engineVerification:unverified`；单文件 1 MiB、输入合计 8 MiB、最多 256 次脚本检查，解析子进程有 3 秒期限。详情与审计剩余任务见[能力审计跟进](docs/capability-audit-followup.md)。
 
