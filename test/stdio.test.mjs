@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { hash } from '../dist/files.js';
 
-test('real stdio handshake, 20 tools, video creation, asset import and restore, project edits and clean shutdown',async t => {
+test('real stdio handshake, 21 tools, video creation, asset import and restore, project edits and clean shutdown',async t => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(),'we-mcp-stdio-'));
   const configFile = path.join(workspace,'config.json');
   const inbox=path.join(workspace,'inbox'); await fs.mkdir(inbox);
@@ -21,7 +21,7 @@ test('real stdio handshake, 20 tools, video creation, asset import and restore, 
   const client = new Client({name:'smoke-test',version:'1'});
   t.after(async()=>{await client.close();await fs.rm(workspace,{recursive:true,force:true})});
   await client.connect(transport);
-  const tools = await client.listTools(); assert.equal(tools.tools.length,20);
+  const tools = await client.listTools(); assert.equal(tools.tools.length,21);
   assert.ok(tools.tools.some(tool=>tool.name==='we_workspace_diagnose'));
   assert.ok(tools.tools.some(tool=>tool.name==='we_preview_move_mouse'));
   const unknownPreview='11111111-1111-4111-8111-111111111111';

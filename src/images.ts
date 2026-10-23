@@ -6,7 +6,7 @@ import type { Projects } from './projects.js';
 
 const maxBytes = 20 * 1024 * 1024, maxPixels = 16777216, maxEdge = 8192;
 
-async function metadata(data: Buffer) {
+export async function imageMetadata(data: Buffer) {
   const format = data.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) ? 'png' :
     data.subarray(0, 3).equals(Buffer.from([255,216,255])) ? 'jpeg' :
     data.toString('ascii', 0, 4) === 'RIFF' && data.toString('ascii', 8, 12) === 'WEBP' ? 'webp' : undefined;
@@ -36,14 +36,14 @@ async function metadata(data: Buffer) {
 
 export async function inspectImage(config: Config, sourceRoot: number, sourcePath: string) {
   const data = await readAssetSource(config, sourceRoot, sourcePath, maxBytes, 'IMAGE_LIMIT');
-  return { sourceRoot, sourcePath, image: await metadata(data) };
+  return { sourceRoot, sourcePath, image: await imageMetadata(data) };
 }
 
 export async function importImage(projects: Projects, args: AssetImport) {
   const next = await prepareAssetImport(projects, args, 'IMAGE_EXISTS');
   const data = await readAssetSource(projects.config, args.sourceRoot, args.sourcePath, maxBytes, 'IMAGE_LIMIT');
   if (hash(data) !== args.expectedSourceHash) throw new Fault('SOURCE_CHANGED', 'Source hash differs from the inspected image; inspect again.');
-  const image = await metadata(data);
+  const image = await imageMetadata(data);
   const extensions: Record<string, string[]> = { png: ['.png'], jpeg: ['.jpg', '.jpeg'], webp: ['.webp'] };
   if (!extensions[image.format]?.includes(path.posix.extname(args.targetPath).toLowerCase())) throw new Fault('IMAGE_EXTENSION', 'Destination extension must match the decoded image format.');
   next.set(args.targetPath, data);

@@ -191,7 +191,7 @@ export class Projects {
     return this.createFiles(name,title,files,{ sourceProjectId:sourceProjectId ?? null,templateId:sourceProjectId ? null : templateId });
   }
   // Internal bounded byte-based creation, shared by templates, source copies and inspected video assets.
-  async createFiles(name: string, title: string, files: Files, origin: { sourceProjectId: string | null; templateId: string | null; mediaSourceHash?: string }) {
+  async createFiles(name: string, title: string, files: Files, origin: { sourceProjectId: string | null; templateId: string | null; mediaSourceHash?: string; imageSourceHash?: string }) {
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) throw new Fault('INVALID_NAME', 'Name must use lowercase ASCII letters, digits and hyphens.');
     const id = `managed/${name}`, target = await this.resolve(id,true), p = manifest(files);
     p.title = title; delete p.workshopid;

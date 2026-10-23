@@ -56,7 +56,7 @@ export class Engine {
       cli: { status: executable && process.platform === 'win32' ? 'unverified' : 'unavailable', reason: cliReason ?? 'Executable found; command receipt and rendering require an actual preview.' },
       cefDiscovery: cdp, nativeWindowCapture,
       webPreviewConcurrency: { status:'limited',maxActivePerSession:1,scope:'server-session',reason:'Local official-engine/CEF testing reproduced a missing second Web renderer even without remote debugging. Close the registered Web preview before opening another; this is not a cross-process lock.' },
-      sceneAuthoring: { status: 'limited', templates:['scene-orbit'], reason: 'Bundled image layer with source PNG, compiled TEX and property-bound SceneScript. Each project still requires engine/editor verification; arbitrary Scene authoring is not implemented.' }
+      sceneAuthoring: { status: 'limited', templates:['scene-orbit'], imageCreationTool:'we_scene_create', reason: 'Bundled image layer and a bounded image-background/light creator using the installed official texture compiler. Each project still requires engine/editor verification; arbitrary Scene authoring and segmentation are not implemented.' }
     } };
   }
   private get(id: string) {

@@ -55,7 +55,7 @@ node dist/index.js
 {"name":"we_workspace_diagnose","arguments":{}}
 ```
 
-返回 `workspace`、`mode`、`lock`、`holder` 和 `recovery`。`mode: "owner"` 表示当前会话仍持有原锁；`"diagnostic"` 表示仅可诊断及尝试受控恢复，其余 18 个工具均返回 `WORKSPACE_LOCKED`。原锁发生变化或不可读时，原持有会话的普通操作返回 `WORKSPACE_OWNERSHIP_LOST`，不会自动解锁。
+返回 `workspace`、`mode`、`lock`、`holder` 和 `recovery`。`mode: "owner"` 表示当前会话仍持有原锁；`"diagnostic"` 表示仅可诊断及尝试受控恢复，其余 19 个工具均返回 `WORKSPACE_LOCKED`。原锁发生变化或不可读时，原持有会话的普通操作返回 `WORKSPACE_OWNERSHIP_LOST`，不会自动解锁。
 
 新锁在 `server.lock/owner.json` 记录 PID、主机、平台、随机会话标识和进程启动身份。Windows 使用系统自带 PowerShell 只读查询 `Process.StartTime`，无需截图 helper；查询有 3 秒期限。旧空锁、记录损坏、异地主机、权限不足或查询失败均保持 `holder.state: "unknown"`。`"alive"`、`"exited"`、`"pid-reused"` 是采样时的身份核对结果；其中 PID 复用表示启动时间不匹配，不是只凭 PID 推断。`lock.fingerprint` 可用于识别两次诊断间的变化，不授予解锁权限。
 
@@ -115,6 +115,7 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 | `we_media_inspect` | 从 `assetRoots` 探测 WAV/MP3/MP4/WebM，返回时长、轨道、尺寸、帧率、采样率与哈希；仅元数据，不证明可播放 |
 | `we_media_import` | 校验源哈希与工程 revision 后原字节导入媒体，保存检查点、默认拒绝覆盖；不创建视频工程或转码 |
 | `we_video_create` | 用已探测的 MP4/WebM 与源哈希创建新的原生视频工程；原字节复制、拒绝同名工程；创建成功仍不代表播放通过 |
+| `we_scene_create` | 用已探测的图片及源哈希创建“原图背景＋独立光点”Scene；保留原字节，调用已安装的官方编译器生成 rgba8888 纹理；提供速度、位移、大小、显示属性，不拆分人物 |
 | `we_preview_open` | 从固定源码副本打开唯一命名窗口；每个服务会话最多登记一个 Web，Scene 可共存；返回就绪证据或未验证状态 |
 | `we_preview_set_properties` | 校验类型及范围后修改该预览的公开参数，不修改源码默认值 |
 | `we_preview_move_mouse` | 向自有 Web CEF 预览派发鼠标移动；`x/y` 为 0～1 的归一化坐标，左上 `(0,0)`、右下 `(1,1)`；不移动系统光标 |
@@ -127,6 +128,8 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 媒体入口复用 `assetRoots`：先 inspect，再将返回哈希传给 import 或 `we_video_create`；支持纯文本客户端、解析期限、MCP 取消和退出清理。单文件最多 40 MiB，工程仍受 64 MiB / 2000 文件约束。示例和格式范围见[音视频素材入口](docs/media-import.md)；原生 MP4/WebM、Web 中 WebM 及受控真实音频响应的本机验收见[视频与音频验收](docs/video-audio-acceptance.md)。不同格式、编码轨道仍需逐工程验证。
 
 Web 音频监听器要求 `project.json` 中的 `general.supportsaudioprocessing: true`；根节点同名标记不起作用。旧模板生成的工程若只有根节点标记，现在校验会明确拒绝。受管工程可先 inspect，再通过带 revision 的 apply 修正 manifest，并重新打开预览。不会自动修改历史作品或检查点；静态校验通过仍需真实音频对照。
+
+图片 Scene 先调用 `we_image_inspect`，再向 `we_scene_create` 传相同素材索引、相对路径及哈希。需要 Windows 和 `installDir/bin/resourcecompiler64.exe`；不下载或分发编译器，不开放任意编译参数。保留 `sources/original.*`，编译副本按 EXIF 方向转成 sRGB PNG，保持显示尺寸；固定 rgba8888、关闭 mipmap，单图最多 8388608 像素且须满足工程总预算。每个编译进程限 30 秒，输出/纹理文件有界；编译中的请求取消与 EOF 会终止该子进程，失败不保存新工程。完整范围、真实用户图片验收、失败记录和限制见[图片 Scene 报告](docs/image-scene-acceptance.md)。
 
 Web JS 语法检查区分 HTML 中的普通脚本与模块，覆盖内联脚本及本地 `.js` / `.mjs`。错误包含文件与行列号；损坏脚本会阻止 apply、预览和发布准备。检查只解析、不执行脚本，保留 `engineVerification:unverified`；单文件 1 MiB、输入合计 8 MiB、最多 256 次脚本检查，解析子进程有 3 秒期限。详情与审计剩余任务见[能力审计跟进](docs/capability-audit-followup.md)。
 
