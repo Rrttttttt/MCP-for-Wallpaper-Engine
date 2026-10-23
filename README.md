@@ -109,7 +109,7 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 | `we_project_create` | 用 `web-starfield` 或 `scene-orbit` 创建工程，或用 `sourceProjectId` 导入受管副本；移除旧 workshopid |
 | `we_project_apply` | 按 `expectedRevision` 写入 UTF-8 文件或删除文件，先静态检查并保存检查点 |
 | `we_project_restore` | 恢复指定检查点，校验归属、内容哈希和当前 revision |
-| `we_project_validate` | 检查 JSON、入口、HTML/CSS 引用、音频开关及 Scene 本地图片层依赖；不冒充真实引擎验证 |
+| `we_project_validate` | 检查 JSON、入口、HTML/CSS 引用、Web JS 语法、音频开关及 Scene 本地图片层依赖；不冒充真实引擎验证 |
 | `we_image_inspect` | 从 `assetRoots` 指定目录检查静态 PNG/JPEG/WebP，完整解码并返回尺寸、透明度、方向及 SHA256；仅返回文本 |
 | `we_image_import` | 校验源哈希与工程 revision 后原字节导入，保存检查点；默认拒绝覆盖；不自动修改素材引用 |
 | `we_preview_open` | 从固定源码副本打开唯一命名窗口；每个服务会话最多登记一个 Web，Scene 可共存；返回就绪证据或未验证状态 |
@@ -120,6 +120,8 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 | `we_publish_prepare` | 复制运行工程到发布暂存目录并输出剩余步骤，不打包 `.pkg` 或上传 |
 
 ## 一次创作循环
+
+Web JS 语法检查区分 HTML 中的普通脚本与模块，覆盖内联脚本及本地 `.js` / `.mjs`。错误包含文件与行列号；损坏脚本会阻止 apply、预览和发布准备。检查只解析、不执行脚本，保留 `engineVerification:unverified`；单文件 1 MiB、输入合计 8 MiB、最多 256 次脚本检查，解析子进程有 3 秒期限。详情与审计剩余任务见[能力审计跟进](docs/capability-audit-followup.md)。
 
 1. 用 `we_project_create` 创建 `managed/my-wallpaper`。当前模板支持速度、密度、音频开关、星体颜色，运行文件无网络依赖。
 2. 用 `we_project_inspect` 获取 revision 与源码；调用 `we_project_apply` 时传入该 revision。`content: null` 表示删除，其他值是文件的完整新内容。

@@ -32,6 +32,27 @@ test('real stdio handshake, 17 tools, image import/restore, project edits and cl
   assert.equal(created.isError,undefined);
   const project = created.structuredContent;
   assert.equal(project.validation.valid,true);
+  const syntaxError=await client.callTool({name:'we_project_apply',arguments:{projectId:project.projectId,expectedRevision:project.revision,changes:[{path:'wallpaper.js',content:'function ('}]}});
+  assert.equal(syntaxError.isError,true); assert.equal(syntaxError.structuredContent.error.code,'VALIDATION_FAILED');
+  assert.equal(syntaxError.structuredContent.error.details.javascript.issues[0].code,'JS_SYNTAX');
+  const afterSyntaxError=await client.callTool({name:'we_project_inspect',arguments:{projectId:project.projectId}});
+  assert.equal(afterSyntaxError.structuredContent.revision,project.revision);
+  const syntaxValidation=await client.callTool({name:'we_project_validate',arguments:{projectId:project.projectId}});
+  assert.equal(syntaxValidation.structuredContent.javascript.status,'passed');
+  assert.equal(syntaxValidation.structuredContent.engineVerification,'unverified');
+  // Simulate a legacy/manual broken edit; public apply now refuses to create it.
+  const scriptPath=path.join(project.path,'wallpaper.js'),originalScript=await fs.readFile(scriptPath,'utf8');
+  await fs.writeFile(scriptPath,'function (');
+  const brokenInspect=await client.callTool({name:'we_project_inspect',arguments:{projectId:project.projectId}});
+  const brokenValidation=await client.callTool({name:'we_project_validate',arguments:{projectId:project.projectId}});
+  assert.equal(brokenValidation.structuredContent.valid,false);
+  assert.equal(brokenValidation.structuredContent.javascript.issues[0].code,'JS_SYNTAX');
+  for(const name of ['we_preview_open','we_publish_prepare']) {
+    const blocked=await client.callTool({name,arguments:{projectId:project.projectId}});
+    assert.equal(blocked.isError,true); assert.equal(blocked.structuredContent.error.code,'VALIDATION_FAILED');
+  }
+  const repaired=await client.callTool({name:'we_project_apply',arguments:{projectId:project.projectId,expectedRevision:brokenInspect.structuredContent.revision,changes:[{path:'wallpaper.js',content:originalScript}]}});
+  assert.equal(repaired.isError,undefined); assert.equal(repaired.structuredContent.revision,project.revision);
   const inspectedImage=await client.callTool({name:'we_image_inspect',arguments:{sourceRoot:0,sourcePath:'source.png'}});
   assert.equal(inspectedImage.isError,undefined);
   assert.equal(inspectedImage.content.every(block=>block.type==='text'),true);

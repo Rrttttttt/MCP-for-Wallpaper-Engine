@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WorkspaceLock } from './workspace.js';
+import { checkWebJavaScript } from './javascript.js';
 import { Fault, type Config, type Files, readTree, revision, manifest, safeJoin, noLinks, writeTree, atomicWrite, hash, json, relativeFile } from './files.js';
 
 export function checkProperties(definitions: Record<string, any>, values: Record<string, unknown>) {
@@ -105,7 +106,12 @@ export function validate(files: Files) {
       if (scene?.objects?.length > 2000) warnings.push('Scene dependency inspection truncated at 2000 objects.');
     } catch { errors.push('Cannot inspect Scene image dependencies; check scene, model and material JSON structure.'); }
   }
-  return { valid: errors.length === 0, errors, warnings: [...new Set(warnings)], ...(String(p.type).toLowerCase() === 'scene' ? {sceneDependencies} : {}), engineVerification: 'unverified', limitations: ['Static reference checks cover HTML/CSS and local Scene image-model/material/texture chains; arbitrary scripts, shaders and other Scene layer types require runtime/editor verification.', 'JavaScript syntax and runtime compatibility require engine validation.'] };
+  const javascript = String(p.type).toLowerCase() === 'web' ? checkWebJavaScript(files) : undefined;
+  if (javascript) {
+    errors.push(...javascript.issues.map(issue => `${issue.code}: ${issue.file}${issue.line ? `:${issue.line}:${issue.column}` : ''}: ${issue.message}`));
+    warnings.push(...javascript.warnings);
+  }
+  return { valid: errors.length === 0, errors, warnings: [...new Set(warnings)], ...(javascript ? {javascript} : {}), ...(String(p.type).toLowerCase() === 'scene' ? {sceneDependencies} : {}), engineVerification: 'unverified', limitations: ['Static reference checks cover HTML/CSS and local Scene image-model/material/texture chains; arbitrary scripts, shaders and other Scene layer types require runtime/editor verification.', 'Web JavaScript syntax checks do not execute code or prove CEF compatibility, module resolution, host APIs or visual correctness. SceneScript and GLSL are not parsed as Web JavaScript. Inline event handlers, dynamically generated scripts, base URLs and non-UTF-8 sources require separate review.'] };
 }
 
 export class Projects {
