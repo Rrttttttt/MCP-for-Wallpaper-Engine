@@ -6,16 +6,21 @@ import os from 'node:os';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { fileURLToPath } from 'node:url';
+import sharp from 'sharp';
+import { hash } from '../dist/files.js';
 
-test('real stdio handshake, 15 tools, project create/apply/error and clean shutdown',async t => {
+test('real stdio handshake, 17 tools, image import/restore, project edits and clean shutdown',async t => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(),'we-mcp-stdio-'));
   const configFile = path.join(workspace,'config.json');
-  await fs.writeFile(configFile,JSON.stringify({workspace:path.join(workspace,'data')}));
+  const inbox=path.join(workspace,'inbox'); await fs.mkdir(inbox);
+  const png=await sharp({create:{width:32,height:16,channels:4,background:'#66aaff88'}}).png().toBuffer();
+  await fs.writeFile(path.join(inbox,'source.png'),png);
+  await fs.writeFile(configFile,JSON.stringify({workspace:path.join(workspace,'data'),assetRoots:[inbox]}));
   const transport = new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/index.js',import.meta.url)),'--config',configFile],stderr:'pipe'});
   const client = new Client({name:'smoke-test',version:'1'});
   t.after(async()=>{await client.close();await fs.rm(workspace,{recursive:true,force:true})});
   await client.connect(transport);
-  const tools = await client.listTools(); assert.equal(tools.tools.length,15);
+  const tools = await client.listTools(); assert.equal(tools.tools.length,17);
   assert.ok(tools.tools.some(tool=>tool.name==='we_workspace_diagnose'));
   assert.ok(tools.tools.some(tool=>tool.name==='we_preview_move_mouse'));
   const unknownPreview='11111111-1111-4111-8111-111111111111';
@@ -27,6 +32,20 @@ test('real stdio handshake, 15 tools, project create/apply/error and clean shutd
   assert.equal(created.isError,undefined);
   const project = created.structuredContent;
   assert.equal(project.validation.valid,true);
+  const inspectedImage=await client.callTool({name:'we_image_inspect',arguments:{sourceRoot:0,sourcePath:'source.png'}});
+  assert.equal(inspectedImage.isError,undefined);
+  assert.equal(inspectedImage.content.every(block=>block.type==='text'),true);
+  assert.equal(inspectedImage.structuredContent.image.sha256,hash(png));
+  const importedImage=await client.callTool({name:'we_image_import',arguments:{projectId:project.projectId,expectedRevision:project.revision,sourceRoot:0,sourcePath:'source.png',expectedSourceHash:hash(png),targetPath:'images/source.png'}});
+  assert.equal(importedImage.isError,undefined);
+  assert.equal(importedImage.content.every(block=>block.type==='text'),true);
+  assert.deepEqual(await fs.readFile(path.join(project.path,'images/source.png')),png);
+  const refusedOverwrite=await client.callTool({name:'we_image_import',arguments:{projectId:project.projectId,expectedRevision:importedImage.structuredContent.revision,sourceRoot:0,sourcePath:'source.png',expectedSourceHash:hash(png),targetPath:'images/source.png'}});
+  assert.equal(refusedOverwrite.structuredContent.error.code,'IMAGE_EXISTS');
+  const restoredImage=await client.callTool({name:'we_project_restore',arguments:{projectId:project.projectId,expectedRevision:importedImage.structuredContent.revision,checkpointId:importedImage.structuredContent.checkpointId}});
+  assert.equal(restoredImage.isError,undefined); assert.equal(restoredImage.structuredContent.revision,project.revision);
+  await assert.rejects(fs.access(path.join(project.path,'images/source.png')),{code:'ENOENT'});
+  assert.deepEqual(await fs.readFile(path.join(inbox,'source.png')),png);
   const scene = await client.callTool({name:'we_project_create',arguments:{name:'scene',title:'Native Scene',templateId:'scene-orbit'}});
   assert.equal(scene.isError,undefined);
   assert.equal(scene.structuredContent.manifest.type,'scene');

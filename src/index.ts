@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Fault, loadConfig, readTree, json } from './files.js';
 import { Projects, validate } from './projects.js';
 import { Engine } from './engine.js';
+import { inspectImage, importImage } from './images.js';
 
 const configFlag = process.argv.indexOf('--config');
 const configFile = configFlag >= 0 ? process.argv[configFlag + 1]! : fileURLToPath(new URL('../we.config.json', import.meta.url));
@@ -60,6 +61,8 @@ if (process.argv.includes('--probe')) {
     tool('we_preview_observe','Capture owned CEF or native-window PNGs and available diagnostics. Defaults to text and saved paths; includeImages opts into bounded MCP image blocks. Native frames do not prove Scene script health. reload reopens the fixed snapshot.',{previewId:z.string().uuid(),count:z.number().int().min(1).max(3).default(1),intervalMs:z.number().int().min(100).max(2000).default(250),afterCursor:z.number().int().min(0).default(0),reload:z.boolean().default(false),backend:z.enum(['auto','cef','native']).default('auto'),includeImages:z.boolean().default(false)},a => engine.observe(a.previewId,a.count,a.intervalMs,a.afterCursor,a.reload,a.backend,a.includeImages));
     tool('we_preview_close','Close only a window created by this server session. No global stop/kill commands.',{previewId:z.string().uuid()},a => engine.close(a.previewId));
     tool('we_publish_prepare','Stage offline runtime sources and a preparation report; never packs native assets or uploads to Workshop.',{projectId:pid,intent:z.enum(['new','update']).default('new')},a => projects.publish(a.projectId,a.intent));
+    tool('we_image_inspect','Inspect and fully decode a static PNG/JPEG/WebP beneath configured assetRoots. sourceRoot is its zero-based index; sourcePath is relative. Returns dimensions, alpha, orientation and SHA256 as text. No arbitrary paths or image blocks.',{sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240)},a=>inspectImage(config,a.sourceRoot,a.sourcePath),true);
+    tool('we_image_import','Import the exact inspected image bytes into a managed project, using expectedSourceHash and expectedRevision. Saves a checkpoint; refuses existing destinations unless overwrite:true. Does not wire assets into HTML/CSS or compile Scene textures.',{projectId:pid,expectedRevision:rev,sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240),expectedSourceHash:rev,targetPath:z.string().min(1).max(240),overwrite:z.boolean().default(false)},a=>importImage(projects,a),false,true);
     return server;
   };
   const handle = serveStdio(factory,{ onerror:e => console.error(e.message) });

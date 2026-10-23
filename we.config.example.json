@@ -2,6 +2,7 @@
   "installDir": "F:/SteamLibrary/steamapps/common/wallpaper_engine",
   "workspace": ".we-mcp",
   "projectRoots": [],
+  "assetRoots": [],
   "devtoolsPort": null,
   "timeoutMs": 12000
 }

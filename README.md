@@ -37,10 +37,13 @@ node dist/index.js
 | `installDir` | 官方引擎安装目录，包含 wallpaper32.exe 或 wallpaper64.exe |
 | `workspace` | 受管工程、检查点、预览副本、截图和发布暂存目录；默认 `.we-mcp` |
 | `projectRoots` | 额外只读工程目录；可以是工程本身或其父目录；不扫描整盘 |
+| `assetRoots` | 允许读取图片的目录列表，默认 `[]`；图片工具使用目录索引和相对路径，不扫描整盘 |
 | `devtoolsPort` | 手动配置的本机 CEF 调试端口；`null` 时仍可使用 CLI、工程管理和已构建的原生截图后端 |
 | `timeoutMs` | 单次操作等待上限，1000–30000 毫秒 |
 
 本机集成测试要求在正常用户权限下访问引擎。受限沙箱可能使 CEF 无法写入自身配置目录，出现 `ProcessSingleton ... Error code: 5`；这是实际遇到的环境限制。
+
+图片检查与原字节导入需配置 `assetRoots`。支持静态 PNG/JPEG/WebP、源哈希核对、显式覆盖和检查点恢复；完整调用示例、开源选型、预算及未验收范围见[图片导入说明](docs/image-import.md)。该功能尚未执行超分。
 
 ### 工作区锁诊断
 
@@ -52,7 +55,7 @@ node dist/index.js
 {"name":"we_workspace_diagnose","arguments":{}}
 ```
 
-返回 `workspace`、`mode`、`lock`、`holder` 和 `recovery`。`mode: "owner"` 表示当前会话仍持有原锁；`"diagnostic"` 表示仅可诊断及尝试受控恢复，其余 13 个工具均返回 `WORKSPACE_LOCKED`。原锁发生变化或不可读时，原持有会话的普通操作返回 `WORKSPACE_OWNERSHIP_LOST`，不会自动解锁。
+返回 `workspace`、`mode`、`lock`、`holder` 和 `recovery`。`mode: "owner"` 表示当前会话仍持有原锁；`"diagnostic"` 表示仅可诊断及尝试受控恢复，其余 15 个工具均返回 `WORKSPACE_LOCKED`。原锁发生变化或不可读时，原持有会话的普通操作返回 `WORKSPACE_OWNERSHIP_LOST`，不会自动解锁。
 
 新锁在 `server.lock/owner.json` 记录 PID、主机、平台、随机会话标识和进程启动身份。Windows 使用系统自带 PowerShell 只读查询 `Process.StartTime`，无需截图 helper；查询有 3 秒期限。旧空锁、记录损坏、异地主机、权限不足或查询失败均保持 `holder.state: "unknown"`。`"alive"`、`"exited"`、`"pid-reused"` 是采样时的身份核对结果；其中 PID 复用表示启动时间不匹配，不是只凭 PID 推断。`lock.fingerprint` 可用于识别两次诊断间的变化，不授予解锁权限。
 
@@ -107,6 +110,8 @@ helper 存在时，预览启动、调参、截图和关闭均增加窗口归属�
 | `we_project_apply` | 按 `expectedRevision` 写入 UTF-8 文件或删除文件，先静态检查并保存检查点 |
 | `we_project_restore` | 恢复指定检查点，校验归属、内容哈希和当前 revision |
 | `we_project_validate` | 检查 JSON、入口、HTML/CSS 引用、音频开关及 Scene 本地图片层依赖；不冒充真实引擎验证 |
+| `we_image_inspect` | 从 `assetRoots` 指定目录检查静态 PNG/JPEG/WebP，完整解码并返回尺寸、透明度、方向及 SHA256；仅返回文本 |
+| `we_image_import` | 校验源哈希与工程 revision 后原字节导入，保存检查点；默认拒绝覆盖；不自动修改素材引用 |
 | `we_preview_open` | 从固定源码副本打开唯一命名窗口；每个服务会话最多登记一个 Web，Scene 可共存；返回就绪证据或未验证状态 |
 | `we_preview_set_properties` | 校验类型及范围后修改该预览的公开参数，不修改源码默认值 |
 | `we_preview_move_mouse` | 向自有 Web CEF 预览派发鼠标移动；`x/y` 为 0～1 的归一化坐标，左上 `(0,0)`、右下 `(1,1)`；不移动系统光标 |

@@ -79,17 +79,19 @@ export function manifest(files: Files): Record<string, any> {
   catch { throw new Fault('INVALID_PROJECT', 'Missing or malformed project.json.'); }
 }
 export interface Config {
-  installDir?: string; workspace: string; projectRoots: string[]; devtoolsPort?: number | null; timeoutMs: number;
+  installDir?: string; workspace: string; projectRoots: string[]; assetRoots?: string[]; devtoolsPort?: number | null; timeoutMs: number;
 }
 export async function loadConfig(file: string): Promise<Config> {
   const base = path.dirname(path.resolve(file));
   let input: any = {};
   try { input = JSON.parse(await fs.readFile(file, 'utf8')); }
   catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  if (input.assetRoots !== undefined && (!Array.isArray(input.assetRoots) || input.assetRoots.length > 32 || input.assetRoots.some((root: unknown) => typeof root !== 'string' || !root.trim()))) throw new Fault('CONFIG', 'assetRoots must be an array of at most 32 nonempty directory paths.');
   const config: Config = {
     installDir: input.installDir ? path.resolve(base, input.installDir) : undefined,
     workspace: path.resolve(base, input.workspace ?? '.we-mcp'),
     projectRoots: (input.projectRoots ?? []).map((root: string) => path.resolve(base, root)),
+    assetRoots: (input.assetRoots ?? []).map((root: string) => path.resolve(base, root)),
     devtoolsPort: input.devtoolsPort ?? null,
     timeoutMs: input.timeoutMs ?? 12000
   };
