@@ -6,7 +6,7 @@ import { Fault, loadConfig, readTree, json } from './files.js';
 import { Projects, validate } from './projects.js';
 import { Engine } from './engine.js';
 import { inspectImage, importImage } from './images.js';
-import { inspectMedia, importMedia } from './media.js';
+import { inspectMedia, importMedia, createVideo } from './media.js';
 
 const configFlag = process.argv.indexOf('--config');
 const configFile = configFlag >= 0 ? process.argv[configFlag + 1]! : fileURLToPath(new URL('../we.config.json', import.meta.url));
@@ -66,6 +66,7 @@ if (process.argv.includes('--probe')) {
     tool('we_image_inspect','Inspect and fully decode a static PNG/JPEG/WebP beneath configured assetRoots. sourceRoot is its zero-based index; sourcePath is relative. Returns dimensions, alpha, orientation and SHA256 as text. No arbitrary paths or image blocks.',{sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240)},a=>inspectImage(config,a.sourceRoot,a.sourcePath),true);
     tool('we_image_import','Import the exact inspected image bytes into a managed project, using expectedSourceHash and expectedRevision. Saves a checkpoint; refuses existing destinations unless overwrite:true. Does not wire assets into HTML/CSS or compile Scene textures.',{projectId:pid,expectedRevision:rev,sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240),expectedSourceHash:rev,targetPath:z.string().min(1).max(240),overwrite:z.boolean().default(false)},a=>importImage(projects,a),false,true);
     tool('we_media_inspect','Inspect WAV/MP3/MP4/WebM bytes beneath configured assetRoots with an isolated metadata parser. Returns duration, audio/video tracks, dimensions and SHA256 as text. Metadata-only: decoding, codecs in the engine and playback remain unverified.',{sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240)},(a,signal)=>inspectMedia(config,a.sourceRoot,a.sourcePath,AbortSignal.any([mediaLifetime.signal,signal])),true);
+    tool('we_video_create','Create a new native video wallpaper from inspected MP4/WebM bytes beneath assetRoots using expectedSourceHash. Copies exact bytes and writes the video manifest together; refuses an existing project. No transcoding or playback claim. Use native preview capture to verify rendering; Web CEF video codecs differ.',{name:z.string(),title:z.string().min(1).max(200),sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240),expectedSourceHash:rev},(a,signal)=>createVideo(projects,a,AbortSignal.any([mediaLifetime.signal,signal])));
     tool('we_media_import','Import exact inspected WAV/MP3/MP4/WebM bytes into a managed project using expectedSourceHash and expectedRevision. Saves a checkpoint; refuses existing paths unless overwrite:true. Does not create video wallpapers, transcode, wire references or prove playback.',{projectId:pid,expectedRevision:rev,sourceRoot:z.number().int().min(0),sourcePath:z.string().min(1).max(240),expectedSourceHash:rev,targetPath:z.string().min(1).max(240),overwrite:z.boolean().default(false)},(a,signal)=>importMedia(projects,a,AbortSignal.any([mediaLifetime.signal,signal])),false,true);
     return server;
   };

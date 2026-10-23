@@ -65,8 +65,21 @@ test('revision hashes content, missing resources fail, and audio metadata is req
   files.delete('style.css'); assert.match(validate(files).errors.join(),/Missing dependency/);
   const manifest = JSON.parse(files.get('project.json'));
   delete manifest.supportsaudioprocessing;
+  delete manifest.general.supportsaudioprocessing;
   files.set('project.json',Buffer.from(JSON.stringify(manifest)));
   assert.match(validate(files).errors.join(),/supportsaudioprocessing/);
+});
+
+test('audio listener requires the engine general flag; a root-only flag must not pass validation',async t=>{
+  const {projects}=await fixture(t);
+  const project=await projects.create('audio','Audio'),files=await readTree(project.path);
+  const manifest=JSON.parse(files.get('project.json'));
+  manifest.general.supportsaudioprocessing=true;delete manifest.supportsaudioprocessing;
+  files.set('project.json',Buffer.from(JSON.stringify(manifest)));
+  assert.equal(validate(files).valid,true,'Official general.supportsaudioprocessing must enable audio');
+  delete manifest.general.supportsaudioprocessing;manifest.supportsaudioprocessing=true;
+  files.set('project.json',Buffer.from(JSON.stringify(manifest)));
+  assert.ok(validate(files).errors.some(e=>e.includes('general.supportsaudioprocessing')),'Root-only legacy flag must require explicit repair');
 });
 test('CLI is scoped and serialized as argument arrays; CEF ownership requires exact directory boundaries',() => {
   assert.deepEqual(openArgs('C:/path with spaces/project.json','WE-MCP-id',1280,720),['-control','openWallpaper','-file','C:/path with spaces/project.json','-playInWindow','WE-MCP-id','-width','1280','-height','720']);
@@ -88,13 +101,20 @@ test('template registers audio early, handles sparse properties, pauses and obey
   const context = {window,document:{getElementById:()=>({getContext:()=>ctx})},innerWidth:1280,innerHeight:720,devicePixelRatio:1,performance:{now:()=>0},requestAnimationFrame:callback=>{nextFrame=callback},Math,Number,String,Object,Boolean};
   vm.runInNewContext(source,context);
   assert.equal(typeof audioListener,'function'); assert.equal(window.__weDiagnostics.ready,true);
+  assert.equal(window.__weDiagnostics.audioListener,'registered');
   const listener = window.wallpaperPropertyListener;
   listener.applyUserProperties({speed:{value:0},audio:{value:false}});
   assert.equal(window.__weDiagnostics.settings.speed,0);
   assert.equal(window.__weDiagnostics.settings.audio,false);
   audioListener(Array(128).fill(0.5)); assert.equal(window.__weDiagnostics.audioCallbacks,1);
+  assert.equal(window.__weDiagnostics.audioBass,0.5);
   listener.applyGeneralProperties({fps:10});
   const initial = draws; nextFrame(50); assert.equal(draws,initial); nextFrame(110); assert.equal(draws,initial+1);
+  assert.equal(window.__weDiagnostics.renderedAudioGain,0,'Disabled response must still receive sound but render zero gain');
+  listener.applyUserProperties({audio:{value:true}});
   listener.setPaused(true); nextFrame(300); assert.equal(draws,initial+1);
   listener.setPaused(false); nextFrame(500); assert.equal(draws,initial+2);
+  assert.equal(window.__weDiagnostics.renderedAudioGain,0.5);
+  audioListener(Array(128).fill(0)); nextFrame(700);
+  assert.equal(window.__weDiagnostics.audioBass,0); assert.equal(window.__weDiagnostics.renderedAudioGain,0);
 });

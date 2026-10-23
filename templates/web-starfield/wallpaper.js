@@ -4,7 +4,7 @@
   var settings = { speed: 1, density: 180, audio: true, accent: '0.45 0.68 1' };
   var fps = 60, paused = false, bass = 0, mouseX = 0, mouseY = 0;
   var stars = [], seed = 431960, time = 0, last = performance.now(), accumulator = 0;
-  var diagnostics = window.__weDiagnostics = { ready: false, frames: 0, audioCallbacks: 0, errors: [], settings: settings, paused: false, configuredFps: fps, elapsed: 0 };
+  var diagnostics = window.__weDiagnostics = { ready: false, frames: 0, audioListener: 'unavailable', audioCallbacks: 0, audioBass: 0, renderedAudioGain: 0, errors: [], settings: settings, paused: false, configuredFps: fps, elapsed: 0 };
   function record(message) { diagnostics.errors.push(String(message).slice(0,1000)); if (diagnostics.errors.length > 50) diagnostics.errors.shift(); }
   window.addEventListener('error', function (event) { record(event.message || ('Resource load failed: ' + (event.target && (event.target.src || event.target.href)))); }, true);
   window.addEventListener('unhandledrejection', function (event) { record(event.reason); });
@@ -26,13 +26,15 @@
     window.wallpaperRegisterAudioListener(function (spectrum) {
       var energy = 0;
       for (var n = 0; n < 8; n++) energy += Math.max(0, Math.min(1, Number(spectrum[n]) || 0)) + Math.max(0, Math.min(1, Number(spectrum[n + 64]) || 0));
-      bass = energy / 16; diagnostics.audioCallbacks++;
+      bass = energy / 16; diagnostics.audioBass = bass; diagnostics.audioCallbacks++;
     });
+    diagnostics.audioListener = 'registered';
   }
   function draw(dt) {
     time += dt * Math.max(0, Math.min(4, Number(settings.speed) || 0));
     var w = canvas.width, h = canvas.height;
     var glow = settings.audio ? bass : 0;
+    diagnostics.renderedAudioGain = glow;
     var background = ctx.createRadialGradient(w * 0.62, h * 0.38, 0, w * 0.5, h * 0.5, Math.max(w,h) * 0.8);
     background.addColorStop(0, '#10264b'); background.addColorStop(0.55, '#071326'); background.addColorStop(1, '#020611');
     ctx.fillStyle = background; ctx.fillRect(0,0,w,h);

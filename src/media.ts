@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { Fault, hash, type Config } from './files.js';
+import { Fault, hash, json, type Config } from './files.js';
 import { readAssetSource, prepareAssetImport, type AssetImport } from './assets.js';
 import type { Projects } from './projects.js';
 
@@ -48,6 +48,18 @@ async function probe(data: Buffer, signal?: AbortSignal) {
 export async function inspectMedia(config: Config, sourceRoot: number, sourcePath: string, signal?: AbortSignal) {
   active(signal);
   return { sourceRoot, sourcePath, media: await probe(await readAssetSource(config, sourceRoot, sourcePath, maxBytes, 'MEDIA_LIMIT'), signal) };
+}
+export async function createVideo(projects: Projects, args: { name: string; title: string; sourceRoot: number; sourcePath: string; expectedSourceHash: string }, signal?: AbortSignal) {
+  active(signal);
+  const data = await readAssetSource(projects.config,args.sourceRoot,args.sourcePath,maxBytes,'MEDIA_LIMIT');
+  if (hash(data) !== args.expectedSourceHash) throw new Fault('SOURCE_CHANGED','Source hash differs from the inspected video; inspect again.');
+  const media = await probe(data,signal);
+  if (media.kind !== 'video' || !['mp4','webm'].includes(media.container)) throw new Fault('VIDEO_REQUIRED','Video creation requires an MP4/WebM container with a video track.');
+  const entry = 'wallpaper.' + media.container;
+  const files = new Map([['project.json',Buffer.from(json({title:args.title,type:'video',file:entry}))],[entry,data]]);
+  active(signal);
+  return { ...await projects.createFiles(args.name,args.title,files,{sourceProjectId:null,templateId:null,mediaSourceHash:media.sha256}), media, originalBytesPreserved:true,
+    nextStep:'Open an owned preview and inspect changing decoded frames. Native video codec support, sound and playback are still unverified; this is not a Web video element.' };
 }
 export async function importMedia(projects: Projects, args: AssetImport, signal?: AbortSignal) {
   active(signal);

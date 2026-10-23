@@ -47,7 +47,7 @@ export function validate(files: Files) {
     if (/\.(html|css|js)$/i.test(name)) {
       const text = data.toString();
       if (/https?:\/\/|wss?:\/\//i.test(text)) warnings.push(`External URL in ${name}; offline operation needs review.`);
-      if (/wallpaperRegisterAudioListener/.test(text) && p.supportsaudioprocessing !== true) errors.push('Audio listener requires supportsaudioprocessing: true.');
+      if (/wallpaperRegisterAudioListener/.test(text) && p.general?.supportsaudioprocessing !== true) errors.push('Audio listener requires general.supportsaudioprocessing: true; a root-level flag does not enable engine audio processing.');
       const references = name.endsWith('.html') ? [...text.matchAll(/(?:src|href)\s*=\s*["']([^"'#]+)["']/gi)].map(m => m[1]!) :
         name.endsWith('.css') ? [...text.matchAll(/url\(\s*["']?([^\s)"']+)/gi)].map(m => m[1]!) : [];
       for (const ref of references) {
@@ -182,19 +182,26 @@ export class Projects {
   async create(name: string, title: string, properties: Record<string, unknown> = {}, sourceProjectId?: string, templateId: 'web-starfield' | 'scene-orbit' = 'web-starfield') {
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) throw new Fault('INVALID_NAME', 'Name must use lowercase ASCII letters, digits and hyphens.');
     if (!['web-starfield','scene-orbit'].includes(templateId)) throw new Fault('INVALID_TEMPLATE','Unknown bundled template.');
-    const id = `managed/${name}`, target = await this.resolve(id, true);
+    await this.resolve(`managed/${name}`,true);
     const files = sourceProjectId ? await readTree(await this.resolve(sourceProjectId)) : await readTree(fileURLToPath(new URL(`../templates/${templateId}/`, import.meta.url)));
     const p = manifest(files);
-    p.title = title; delete p.workshopid;
     checkProperties(p.general?.properties ?? {}, properties);
     for (const [key,value] of Object.entries(properties)) p.general.properties[key].value = value;
+    files.set('project.json',Buffer.from(json(p)));
+    return this.createFiles(name,title,files,{ sourceProjectId:sourceProjectId ?? null,templateId:sourceProjectId ? null : templateId });
+  }
+  // Internal bounded byte-based creation, shared by templates, source copies and inspected video assets.
+  async createFiles(name: string, title: string, files: Files, origin: { sourceProjectId: string | null; templateId: string | null; mediaSourceHash?: string }) {
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) throw new Fault('INVALID_NAME', 'Name must use lowercase ASCII letters, digits and hyphens.');
+    const id = `managed/${name}`, target = await this.resolve(id,true), p = manifest(files);
+    p.title = title; delete p.workshopid;
     files.set('project.json', Buffer.from(json(p)));
     const report = validate(files);
     if (!report.valid) throw new Fault('VALIDATION_FAILED', 'New project failed static validation.', report);
     // Exclusive destination creation prevents accidental overwrites.
     await fs.mkdir(target);
     await writeTree(target, files);
-    await atomicWrite(path.join(this.config.workspace, 'origins', name + '.json'), json({ sourceProjectId: sourceProjectId ?? null, templateId: sourceProjectId ? null : templateId, createdAt: new Date().toISOString(), sourceRevision: revision(files) }));
+    await atomicWrite(path.join(this.config.workspace, 'origins', name + '.json'), json({ ...origin, createdAt: new Date().toISOString(), sourceRevision: revision(files) }));
     return this.inspect(id);
   }
   async checkpoint(id: string, files: Files) {

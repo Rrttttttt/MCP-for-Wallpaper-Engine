@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { inspectMedia, importMedia } from '../dist/media.js';
+import { inspectMedia, importMedia, createVideo } from '../dist/media.js';
 import { Projects } from '../dist/projects.js';
 import { hash } from '../dist/files.js';
 
@@ -99,4 +99,32 @@ test('media probe rejects paths, links, oversize, unsupported/corrupt inputs, an
   controller.abort();
   await assert.rejects(importMedia(projects, { projectId: created.projectId, expectedRevision: created.revision, sourceRoot: 0, sourcePath: 'tone.wav', expectedSourceHash: hash(wav), targetPath: 'tone.wav', overwrite: false }, controller.signal), { code: 'MEDIA_CANCELLED' });
   assert.equal((await projects.inspect(created.projectId)).revision, created.revision);
+});
+
+test('native video creation uses inspected bytes, refuses audio, changes, duplicate names and cancelled writes', async t => {
+  const { projects, assets, config } = await fixture(t);
+  for (const [name, container] of [['clip.mp4','mp4'],['clip.webm','webm']]) {
+    const data = await fs.readFile(path.join(assets,name));
+    const args = { name:container,title:'Native '+container,sourceRoot:0,sourcePath:name,expectedSourceHash:hash(data) };
+    await assert.rejects(createVideo(projects,{...args,expectedSourceHash:'0'.repeat(64)}),{code:'SOURCE_CHANGED'});
+    await assert.rejects(createVideo(projects,{...args,name:'../escape'}),{code:'INVALID_NAME'});
+    const created = await createVideo(projects,args);
+    assert.equal(created.validation.valid,true); assert.equal(created.validation.engineVerification,'unverified');
+    assert.equal(created.media.playability,'unverified'); assert.equal(created.manifest.type,'video');
+    assert.equal(created.manifest.file,'wallpaper.'+container); assert.equal(created.files.length,2);
+    assert.deepEqual(await fs.readFile(path.join(created.path,created.manifest.file)),data);
+    const before = created.revision;
+    await assert.rejects(createVideo(projects,args),{code:'EEXIST'});
+    assert.equal((await projects.inspect(created.projectId)).revision,before);
+    assert.deepEqual(await fs.readFile(path.join(assets,name)),data);
+    const copy = await projects.create('copy-'+container,'Copy',{},created.projectId);
+    assert.equal(copy.manifest.type,'video');
+    const staged = await projects.publish(created.projectId,'new');
+    assert.deepEqual(await fs.readFile(path.join(staged.directory,created.manifest.file)),data);
+  }
+  const tone = await fs.readFile(path.join(assets,'tone.wav'));
+  await assert.rejects(createVideo(projects,{name:'audio',title:'Audio',sourceRoot:0,sourcePath:'tone.wav',expectedSourceHash:hash(tone)}),{code:'VIDEO_REQUIRED'});
+  await assert.rejects(createVideo(projects,{name:'cancelled',title:'Cancelled',sourceRoot:0,sourcePath:'clip.mp4',expectedSourceHash:'0'.repeat(64)},AbortSignal.abort()),{code:'MEDIA_CANCELLED'});
+  await assert.rejects(createVideo(new Projects({...config,assetRoots:[]}),{name:'disabled',title:'Disabled',sourceRoot:0,sourcePath:'clip.mp4',expectedSourceHash:'0'.repeat(64)}),{code:'ASSET_ROOT_NOT_CONFIGURED'});
+  assert.deepEqual((await fs.readdir(projects.root)).sort(),['copy-mp4','copy-webm','mp4','webm']);
 });

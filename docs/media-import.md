@@ -2,6 +2,8 @@
 
 2026-10-23，能力审计第 2 步。新增 WAV、MP3、MP4、WebM 的受限探测与原字节导入，继承既有图片入口的路径、覆盖保护和工程检查点。没有实现视频工程模板、转码或真实音频/视频播放验收，超分进度保留。
 
+后续第 3 步新增 `we_video_create` 并进行限定样片的真实播放与系统音频响应验收，见[后续记录](video-audio-acceptance.md)。本文以下保留第 2 步交付时的范围；素材探测返回的 metadata-only / playability:unverified 契约不变，不会因样例验收通过而宣称任意文件可播放。
+
 ## 开源比较及决定
 
 开发前查阅 GitHub、官方文档、npm registry 与上游 issue；Star 是本次网页近似快照。

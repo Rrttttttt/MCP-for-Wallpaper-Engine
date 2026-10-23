@@ -3,8 +3,8 @@
   "description": "Offline Canvas starfield with mouse parallax and optional audio response.",
   "type": "web",
   "file": "index.html",
-  "supportsaudioprocessing": true,
   "general": {
+    "supportsaudioprocessing": true,
     "properties": {
       "speed": { "text": "Speed", "type": "slider", "value": 1, "min": 0, "max": 4, "fraction": true, "order": 0 },
       "density": { "text": "Star count", "type": "slider", "value": 180, "min": 20, "max": 500, "order": 1 },

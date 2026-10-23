@@ -65,7 +65,7 @@ export class Engine {
     return p;
   }
   private async bind(p: Preview) {
-    if (!this.config.devtoolsPort) return false;
+    if (!this.config.devtoolsPort || String(manifest(p.files).type).toLowerCase() !== 'web') return false;
     const target = await findTarget(this.config.devtoolsPort, p.directory);
     if (!target) return false;
     if (p.cdp?.target.id !== target.id || p.cdp?.target.discoveryHost !== target.discoveryHost) {

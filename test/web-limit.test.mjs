@@ -37,3 +37,16 @@ test('second Web is refused before executable lookup, snapshot writes or CLI; cl
   engine.previews.set('scene',{files:await readTree(scene.path)});
   await assert.rejects(engine.open(web.projectId,640,480),{code:'ENGINE_NOT_CONFIGURED'});
 });
+
+test('native Video/Scene observation never attempts CEF discovery; Web observation still does',async t=>{
+  let requests=0;
+  t.mock.method(globalThis,'fetch',async()=>{requests++;throw new Error('No CEF listener in this test')});
+  const engine=new Engine({workspace:'unused',projectRoots:[],devtoolsPort:9223,timeoutMs:1000},{});
+  for(const type of ['video','VIDEO','scene','web']) {
+    engine.previews.set(type,{previewId:type,native:false,directory:path.resolve('unused'),files:new Map([['project.json',Buffer.from(JSON.stringify({type}))]])});
+    const before=requests;
+    await assert.rejects(engine.observe(type,1,250,0,false,'cef'),{code:'CEF_TARGET_UNAVAILABLE'});
+    if(type==='web') assert.ok(requests>before);
+    else assert.equal(requests,before,'Native '+type+' must not probe a Web debugging endpoint');
+  }
+});

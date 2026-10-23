@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { hash } from '../dist/files.js';
 
-test('real stdio handshake, 19 tools, image/media import and restore, project edits and clean shutdown',async t => {
+test('real stdio handshake, 20 tools, video creation, asset import and restore, project edits and clean shutdown',async t => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(),'we-mcp-stdio-'));
   const configFile = path.join(workspace,'config.json');
   const inbox=path.join(workspace,'inbox'); await fs.mkdir(inbox);
@@ -21,7 +21,7 @@ test('real stdio handshake, 19 tools, image/media import and restore, project ed
   const client = new Client({name:'smoke-test',version:'1'});
   t.after(async()=>{await client.close();await fs.rm(workspace,{recursive:true,force:true})});
   await client.connect(transport);
-  const tools = await client.listTools(); assert.equal(tools.tools.length,19);
+  const tools = await client.listTools(); assert.equal(tools.tools.length,20);
   assert.ok(tools.tools.some(tool=>tool.name==='we_workspace_diagnose'));
   assert.ok(tools.tools.some(tool=>tool.name==='we_preview_move_mouse'));
   const unknownPreview='11111111-1111-4111-8111-111111111111';
@@ -80,6 +80,11 @@ test('real stdio handshake, 19 tools, image/media import and restore, project ed
     const restored=await client.callTool({name:'we_project_restore',arguments:{projectId:project.projectId,expectedRevision:saved.structuredContent.revision,checkpointId:saved.structuredContent.checkpointId}});
     assert.equal(restored.isError,undefined); assert.equal(restored.structuredContent.revision,project.revision);
   }
+  const video=await client.callTool({name:'we_video_create',arguments:{name:'video',title:'Native video',sourceRoot:0,sourcePath:'clip.mp4',expectedSourceHash:hash(await fs.readFile(path.join(inbox,'clip.mp4')))}});
+  assert.equal(video.isError,undefined); assert.equal(video.content.every(block=>block.type==='text'),true);
+  assert.equal(video.structuredContent.manifest.type,'video');
+  assert.equal(video.structuredContent.media.playability,'unverified');
+  assert.deepEqual(await fs.readFile(path.join(video.structuredContent.path,'wallpaper.mp4')),await fs.readFile(path.join(inbox,'clip.mp4')));
   const scene = await client.callTool({name:'we_project_create',arguments:{name:'scene',title:'Native Scene',templateId:'scene-orbit'}});
   assert.equal(scene.isError,undefined);
   assert.equal(scene.structuredContent.manifest.type,'scene');
